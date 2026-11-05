@@ -16,7 +16,11 @@ rem error on screen.
 fltmc >nul 2>&1
 if errorlevel 1 (
     echo   Requesting administrator rights - confirm the UAC prompt...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' } catch { exit 9 }"
+    if "%~1"=="" (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    ) else (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' } catch { exit 9 }"
+    )
     if errorlevel 9 (
         echo.
         echo   [ERROR] Could not get administrator rights.

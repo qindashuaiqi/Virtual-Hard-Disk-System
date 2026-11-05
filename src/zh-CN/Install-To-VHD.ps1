@@ -318,7 +318,10 @@ function Test-BcdStoresPath {
     } catch {
         return $null
     } finally {
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        # [v1.32] bcdedit /export 还会在 hive 旁边生成 .LOG / .LOG1 / .LOG2，一起清掉。
+        foreach ($f in @($tmp, "$tmp.LOG", "$tmp.LOG1", "$tmp.LOG2")) {
+            Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -2436,8 +2439,10 @@ exit 0
             Write-Log "卸载 vhdx 失败: $($_.Exception.Message)" 'WARN'
         }
 
-        $be = Install-BootEntry -VhdFullPath $vhdPath -EditionName $EditionName -DisplayName $safeName
+        # [v1.32] 在调用前就置位。若 Install-BootEntry 是 throw（而不是 return），
+        # catch 仍要知道已进入 BCD 阶段，从而保留 vhdx，而不是把它删掉、留下指向已删文件的 .boot.txt。
         $bcdTriesReached = $true
+        $be = Install-BootEntry -VhdFullPath $vhdPath -EditionName $EditionName -DisplayName $safeName
         $bcdOk = [bool]$be.Ok
         $espLetter = $be.EspLetter
 

@@ -321,7 +321,10 @@ function Test-BcdStoresPath {
     } catch {
         return $null
     } finally {
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        # [v1.32] bcdedit /export also drops .LOG / .LOG1 / .LOG2 next to the hive; clean those too.
+        foreach ($f in @($tmp, "$tmp.LOG", "$tmp.LOG1", "$tmp.LOG2")) {
+            Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -2465,8 +2468,11 @@ exit 0
             Write-Log "Could not write the provisional state file: $($_.Exception.Message)" 'WARN'
         }
 
-        $be = Install-BootEntry -VhdFullPath $vhdPath -EditionName $EditionName -DisplayName $safeName
+        # [v1.32] Set the flag BEFORE the call. If Install-BootEntry throws (instead of returning),
+        # the catch must still know we reached the BCD stage, so it keeps the VHDX instead of deleting
+        # it and leaving a .boot.txt that points at a removed file.
         $bcdTriesReached = $true
+        $be = Install-BootEntry -VhdFullPath $vhdPath -EditionName $EditionName -DisplayName $safeName
         $bcdOk = [bool]$be.Ok
         $espLetter = $be.EspLetter
 

@@ -509,7 +509,7 @@ function Get-StateDisplayName {
 # the same thing written twice drifts as soon as one copy is forgotten, which is exactly where P2-5 came from.
 function Get-VhdStateInfo {
     param([string]$Path)
-    $r = @{ HasState = $false; Guid = ''; Desc = ''; Name = '' }
+    $r = @{ HasState = $false; Guid = ''; Desc = ''; Name = ''; Status = '' }
     $st = [System.IO.Path]::ChangeExtension($Path, '.boot.txt')
     if (-not (Test-Path -LiteralPath $st)) { return $r }
     $r.HasState = $true
@@ -519,6 +519,7 @@ function Get-VhdStateInfo {
             $v = $matches[2].Trim()
             if ($k -ieq 'Guid') { $r.Guid = $v }
             elseif ($k -ieq 'Name') { if (-not $r.Name) { $r.Name = $v } }
+            elseif ($k -ieq 'Status') { $r.Status = $v }
         }
     }
     # Always ask the shared function for the name, so it matches what the installer/uninstaller read
@@ -582,7 +583,14 @@ function Select-VhdForRepair {
         if ($st.HasState) {
             $score += 2
             $why = 'has a state file'
-            if ($st.Guid) {
+            # [v1.32] A provisional state (Status=FilesApplied, no GUID) means the install was
+            # interrupted before the boot entry was created - exactly the "no menu" case Repair
+            # exists to fix. Give it the same weight as "entry gone from the BCD" so it wins over
+            # a merely-mispointed entry when several disks are present.
+            if ($st.Status -ieq 'FilesApplied' -and -not $st.Guid) {
+                $score += 4
+                $why = 'install was interrupted before the boot entry was created (no menu)'
+            } elseif ($st.Guid) {
                 $b = Test-BcdEntryForVhd -Guid $st.Guid -VhdPath $f.FullName
                 if (-not $b.Exists) {
                     $score += 4

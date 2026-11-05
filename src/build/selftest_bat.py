@@ -36,6 +36,19 @@ MARKER = 'BATTEST_REACHED_LAUNCH'
 
 LAUNCH_RE = re.compile(r'^powershell -NoProfile[^\r\n]*-File "%PS1FILE%"[^\r\n]*$', re.M)
 ELEV_RE = re.compile(r'^fltmc >nul 2>&1\r?\nif errorlevel 1 \($', re.M)
+ARGLIST_RE = re.compile(r"-ArgumentList '%\*'")
+EMPTYARG_GUARD_RE = re.compile(r'if "%~1"==""', re.M)
+
+
+def lint_arglist_guard(text, name):
+    """A bare -ArgumentList '%*' breaks elevation: Start-Process throws on an
+    empty ArgumentList (exit 9), so a double-clicked launcher with no arguments
+    never gets its UAC prompt. Whenever '%*' is forwarded, there MUST be an
+    empty-argument guard branch (if "%~1"=="") that elevates without it."""
+    bad = []
+    if ARGLIST_RE.search(text) and not EMPTYARG_GUARD_RE.search(text):
+        bad.append('%s  forwards %%* but has no empty-argument guard (if "%%~1"=="")' % name)
+    return bad
 
 
 def lint_parens(text, name):
@@ -83,6 +96,7 @@ def run_one(path, encoding, scratch):
         return ('SKIP', '%s  (menu, no payload)' % name, [])
 
     problems = list(lint_parens(lf, name))
+    problems += list(lint_arglist_guard(lf, name))
 
     test = lf
     if not ELEV_RE.search(test):

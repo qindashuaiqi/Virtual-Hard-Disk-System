@@ -506,7 +506,7 @@ function Get-StateDisplayName {
 # 同一件事写两遍，改一处忘另一处就会漂移，这正是 P2-5 的来源。
 function Get-VhdStateInfo {
     param([string]$Path)
-    $r = @{ HasState = $false; Guid = ''; Desc = ''; Name = '' }
+    $r = @{ HasState = $false; Guid = ''; Desc = ''; Name = ''; Status = '' }
     $st = [System.IO.Path]::ChangeExtension($Path, '.boot.txt')
     if (-not (Test-Path -LiteralPath $st)) { return $r }
     $r.HasState = $true
@@ -516,6 +516,7 @@ function Get-VhdStateInfo {
             $v = $matches[2].Trim()
             if ($k -ieq 'Guid') { $r.Guid = $v }
             elseif ($k -ieq 'Name') { if (-not $r.Name) { $r.Name = $v } }
+            elseif ($k -ieq 'Status') { $r.Status = $v }
         }
     }
     # 名字统一问共享函数，保证和安装器/卸载器读出来的是同一个
@@ -579,7 +580,12 @@ function Select-VhdForRepair {
         if ($st.HasState) {
             $score += 2
             $why = '有状态文件'
-            if ($st.Guid) {
+            # [v1.32] provisional 状态（Status=FilesApplied、无 GUID）表示安装在建启动项前就中断，
+            # 正是「看不到菜单」的场景，给它和「启动项从 BCD 消失」同等的权重，多盘时能正确胜出。
+            if ($st.Status -ieq 'FilesApplied' -and -not $st.Guid) {
+                $score += 4
+                $why = '安装在建启动项前中断（重启看不到菜单）'
+            } elseif ($st.Guid) {
                 $b = Test-BcdEntryForVhd -Guid $st.Guid -VhdPath $f.FullName
                 if (-not $b.Exists) {
                     $score += 4
