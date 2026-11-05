@@ -151,7 +151,7 @@ function Show-Gui {
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Uninstall Virtual System v$($Script:Version) - connectsegabot"
-    $form.Size = New-Object System.Drawing.Size(680, 500)
+    $form.Size = New-Object System.Drawing.Size(680, 528)
     $form.StartPosition = 'CenterScreen'
     $form.FormBorderStyle = 'FixedSingle'
     $form.MaximizeBox = $false
@@ -160,7 +160,7 @@ function Show-Gui {
 
     $header = New-Object System.Windows.Forms.Panel
     $header.Location = New-Object System.Drawing.Point(0, 0)
-    $header.Size = New-Object System.Drawing.Size(680, 76)
+    $header.Size = New-Object System.Drawing.Size(680, 96)
     $header.BackColor = [System.Drawing.Color]::FromArgb(120, 46, 46)
     $form.Controls.Add($header)
 
@@ -168,19 +168,23 @@ function Show-Gui {
     $lblTitle.Text = "Uninstall Virtual System"
     $lblTitle.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 18, [System.Drawing.FontStyle]::Bold)
     $lblTitle.ForeColor = [System.Drawing.Color]::White
-    $lblTitle.Location = New-Object System.Drawing.Point(24, 12)
-    $lblTitle.Size = New-Object System.Drawing.Size(300, 34)
+    $lblTitle.Location = New-Object System.Drawing.Point(24, 8)
+    $lblTitle.Size = New-Object System.Drawing.Size(400, 34)
     $header.Controls.Add($lblTitle)
 
+    # [layout fix] Two lines on purpose: the English sentence needs ~880px and the label is only 620px
+    # wide, so it used to be cut after "The existing" (the Chinese original fits on one line).
+    # 8.5pt keeps it inside the header without moving the list box below.
     $lblSub = New-Object System.Windows.Forms.Label
-    $lblSub.Text = "Deletes an installed virtual system and removes its boot entry from the boot menu. The existing system is not touched.  Author: connectsegabot"
+    $lblSub.Text = "Deletes an installed virtual system and removes its boot entry from the boot menu." + [char]13 + [char]10 + "The original system is not touched.   Author: connectsegabot"
+    $lblSub.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8.5)
     $lblSub.ForeColor = [System.Drawing.Color]::FromArgb(232, 190, 190)
-    $lblSub.Location = New-Object System.Drawing.Point(26, 48)
-    $lblSub.Size = New-Object System.Drawing.Size(600, 20)
+    $lblSub.Location = New-Object System.Drawing.Point(26, 46)
+    $lblSub.Size = New-Object System.Drawing.Size(620, 34)
     $header.Controls.Add($lblSub)
 
     $listBox = New-Object System.Windows.Forms.ListBox
-    $listBox.Location = New-Object System.Drawing.Point(24, 94)
+    $listBox.Location = New-Object System.Drawing.Point(24, 112)
     $listBox.Size = New-Object System.Drawing.Size(620, 130)
     $listBox.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
     $form.Controls.Add($listBox)
@@ -188,12 +192,12 @@ function Show-Gui {
     $lblInfo = New-Object System.Windows.Forms.Label
     $lblInfo.Text = "Searching..."
     $lblInfo.ForeColor = [System.Drawing.Color]::FromArgb(90, 100, 115)
-    $lblInfo.Location = New-Object System.Drawing.Point(26, 232)
+    $lblInfo.Location = New-Object System.Drawing.Point(26, 250)
     $lblInfo.Size = New-Object System.Drawing.Size(618, 40)
     $form.Controls.Add($lblInfo)
 
     $logBox = New-Object System.Windows.Forms.TextBox
-    $logBox.Location = New-Object System.Drawing.Point(24, 278)
+    $logBox.Location = New-Object System.Drawing.Point(24, 296)
     $logBox.Size = New-Object System.Drawing.Size(620, 120)
     $logBox.Multiline = $true
     $logBox.ScrollBars = 'Vertical'
@@ -206,8 +210,8 @@ function Show-Gui {
 
     $btnUninstall = New-Object System.Windows.Forms.Button
     $btnUninstall.Text = "Delete the selected system"
-    $btnUninstall.Location = New-Object System.Drawing.Point(24, 410)
-    $btnUninstall.Size = New-Object System.Drawing.Size(180, 40)
+    $btnUninstall.Location = New-Object System.Drawing.Point(24, 428)
+    $btnUninstall.Size = New-Object System.Drawing.Size(200, 40)
     $btnUninstall.BackColor = [System.Drawing.Color]::FromArgb(180, 52, 52)
     $btnUninstall.ForeColor = [System.Drawing.Color]::White
     $btnUninstall.FlatStyle = 'Flat'
@@ -218,7 +222,7 @@ function Show-Gui {
 
     $btnClose = New-Object System.Windows.Forms.Button
     $btnClose.Text = "Close"
-    $btnClose.Location = New-Object System.Drawing.Point(544, 410)
+    $btnClose.Location = New-Object System.Drawing.Point(544, 428)
     $btnClose.Size = New-Object System.Drawing.Size(100, 40)
     $btnClose.FlatStyle = 'System'
     $form.Controls.Add($btnClose)

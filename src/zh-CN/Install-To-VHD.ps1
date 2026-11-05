@@ -2598,7 +2598,7 @@ function Show-Gui {
     $form.Controls.Add($cmbEd)
 
     $lblEdHint = New-Object System.Windows.Forms.Label
-    $lblEdHint.Text = '这个镜像里有多个版本，选要装哪个'
+    $lblEdHint.Text = '镜像里有多个版本，选一个'
     $lblEdHint.ForeColor = [System.Drawing.Color]::FromArgb(150, 110, 40)
     $lblEdHint.Location = New-Object System.Drawing.Point(580, ($y1 + 81))
     $lblEdHint.Size = New-Object System.Drawing.Size(190, 18)

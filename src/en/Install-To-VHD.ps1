@@ -2537,15 +2537,20 @@ function Show-Gui {
     $t1.Text = $Script:ProductName
     $t1.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 20, [System.Drawing.FontStyle]::Bold)
     $t1.ForeColor = [System.Drawing.Color]::White
-    $t1.Location = New-Object System.Drawing.Point(26, 14)
+    $t1.Location = New-Object System.Drawing.Point(26, 8)
     $t1.Size = New-Object System.Drawing.Size(560, 36)
     $hd.Controls.Add($t1)
 
+    # [layout fix] The tagline is split into two short lines on purpose. The Chinese original fits on one
+    # line, but English at the same font size needs about 950px and was silently clipped by the
+    # 742px single-line label (the text just stopped in the middle of a sentence). Two lines at 8.5pt
+    # stay well inside the header, so no other control has to move.
     $t2 = New-Object System.Windows.Forms.Label
-    $t2.Text = 'No USB stick, no BIOS changes. Every system is a separate virtual hard disk file; install as many as you like, the existing system stays untouched.  Author: connectsegabot'
+    $t2.Text = 'No USB stick, no BIOS changes. Every system is a separate virtual hard disk file - install as many as you like.' + [char]13 + [char]10 + 'The existing system stays untouched.   Author: connectsegabot'
+    $t2.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8.5)
     $t2.ForeColor = [System.Drawing.Color]::FromArgb(168, 196, 226)
-    $t2.Location = New-Object System.Drawing.Point(28, 52)
-    $t2.Size = New-Object System.Drawing.Size(742, 20)
+    $t2.Location = New-Object System.Drawing.Point(28, 46)
+    $t2.Size = New-Object System.Drawing.Size(742, 34)
     $hd.Controls.Add($t2)
 
     # ---- Step 1 ----
@@ -2576,6 +2581,7 @@ function Show-Gui {
     $lblWim.ForeColor = [System.Drawing.Color]::FromArgb(116, 126, 142)
     $lblWim.Location = New-Object System.Drawing.Point(30, ($y1 + 58))
     $lblWim.Size = New-Object System.Drawing.Size(720, 20)
+    $lblWim.AutoEllipsis = $true
     $form.Controls.Add($lblWim)
 
     # [v1.17] Edition selection. One install.wim can hold several systems:
@@ -2586,22 +2592,24 @@ function Show-Gui {
     $lblEd.Text = 'Edition'
     $lblEd.ForeColor = [System.Drawing.Color]::FromArgb(68, 80, 98)
     $lblEd.Location = New-Object System.Drawing.Point(30, ($y1 + 81))
-    $lblEd.Size = New-Object System.Drawing.Size(44, 18)
+    $lblEd.Size = New-Object System.Drawing.Size(52, 18)
     $lblEd.Visible = $false
     $form.Controls.Add($lblEd)
 
     $cmbEd = New-Object System.Windows.Forms.ComboBox
-    $cmbEd.Location = New-Object System.Drawing.Point(76, ($y1 + 79))
-    $cmbEd.Size = New-Object System.Drawing.Size(496, 24)
+    $cmbEd.Location = New-Object System.Drawing.Point(84, ($y1 + 79))
+    $cmbEd.Size = New-Object System.Drawing.Size(486, 24)
     $cmbEd.DropDownStyle = 'DropDownList'
     $cmbEd.Visible = $false
     $form.Controls.Add($cmbEd)
 
     $lblEdHint = New-Object System.Windows.Forms.Label
-    $lblEdHint.Text = 'This image contains several editions, pick the one to install'
+    # [layout fix] Short text on purpose: the slot is only 190px wide.
+    $lblEdHint.Text = 'several editions - pick one'
     $lblEdHint.ForeColor = [System.Drawing.Color]::FromArgb(150, 110, 40)
     $lblEdHint.Location = New-Object System.Drawing.Point(580, ($y1 + 81))
     $lblEdHint.Size = New-Object System.Drawing.Size(190, 18)
+    $lblEdHint.AutoEllipsis = $true
     $lblEdHint.Visible = $false
     $form.Controls.Add($lblEdHint)
 
@@ -2669,6 +2677,7 @@ function Show-Gui {
     $lblDrive.ForeColor = [System.Drawing.Color]::FromArgb(116, 126, 142)
     $lblDrive.Location = New-Object System.Drawing.Point(30, ($y2 + 88))
     $lblDrive.Size = New-Object System.Drawing.Size(740, 20)
+    $lblDrive.AutoEllipsis = $true
     $form.Controls.Add($lblDrive)
 
     # ---- Step 3: system name ----
@@ -2692,14 +2701,14 @@ function Show-Gui {
     $btnNameGen = New-Object System.Windows.Forms.Button
     $btnNameGen.Text = 'Use edition name'
     $btnNameGen.Location = New-Object System.Drawing.Point(476, ($y3 + 26))
-    $btnNameGen.Size = New-Object System.Drawing.Size(96, 30)
+    $btnNameGen.Size = New-Object System.Drawing.Size(116, 30)
     $btnNameGen.FlatStyle = 'System'
     $form.Controls.Add($btnNameGen)
 
     $btnNameNum = New-Object System.Windows.Forms.Button
     $btnNameNum.Text = 'Add number'
-    $btnNameNum.Location = New-Object System.Drawing.Point(578, ($y3 + 26))
-    $btnNameNum.Size = New-Object System.Drawing.Size(80, 30)
+    $btnNameNum.Location = New-Object System.Drawing.Point(600, ($y3 + 26))
+    $btnNameNum.Size = New-Object System.Drawing.Size(96, 30)
     $btnNameNum.FlatStyle = 'System'
     $form.Controls.Add($btnNameNum)
 
@@ -2720,32 +2729,43 @@ function Show-Gui {
     $s4.Size = New-Object System.Drawing.Size(400, 20)
     $form.Controls.Add($s4)
 
+    # [layout fix] 72px instead of 58px: up to 4 entries plus an "and N more" line are printed here,
+    # and English entries are taller than the Chinese ones they replaced (the last line used to be cut).
     $lblSysList = New-Object System.Windows.Forms.Label
     $lblSysList.Text = 'Scanning...'
     $lblSysList.ForeColor = [System.Drawing.Color]::FromArgb(116, 126, 142)
     $lblSysList.Location = New-Object System.Drawing.Point(28, ($y4 + 22))
-    $lblSysList.Size = New-Object System.Drawing.Size(740, 58)
+    $lblSysList.Size = New-Object System.Drawing.Size(740, 72)
     $lblSysList.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8.5)
     $form.Controls.Add($lblSysList)
 
     # ---- Notice box ----
-    $y5 = 526
-    $box = New-Object System.Windows.Forms.Panel
-    $box.Location = New-Object System.Drawing.Point(28, $y5)
-    $box.Size = New-Object System.Drawing.Size(742, 74)
-    $box.BackColor = [System.Drawing.Color]::FromArgb(237, 245, 254)
-    $box.BorderStyle = 'FixedSingle'
-    $form.Controls.Add($box)
-
+    # [layout fix] This used to be a fixed 742x74 panel with a 722x54 label inside. The English notice
+    # wraps to three or four lines and the third one was sliced off by the panel border, so the label
+    # now grows with its own text and everything below it is positioned from the real height.
+    $y5 = 540
     $lblBox = New-Object System.Windows.Forms.Label
     $lblBox.Text = "After installing, reboot and the boot menu will show one extra entry (the name you chose); pick it to boot the new system." + [char]13 + [char]10 + "Install another one by running it again with a different name. To remove it later run Uninstall-System.bat: it is deleted completely and the existing system is not affected at all."
     $lblBox.ForeColor = [System.Drawing.Color]::FromArgb(42, 78, 128)
-    $lblBox.Location = New-Object System.Drawing.Point(10, 10)
-    $lblBox.Size = New-Object System.Drawing.Size(722, 54)
-    $box.Controls.Add($lblBox)
+    $lblBox.BackColor = [System.Drawing.Color]::FromArgb(237, 245, 254)
+    $lblBox.BorderStyle = 'FixedSingle'
+    $lblBox.Padding = New-Object System.Windows.Forms.Padding(10, 7, 10, 7)
+    $lblBox.AutoSize = $true
+    $lblBox.Location = New-Object System.Drawing.Point(28, $y5)
+    # MaximumSize is what makes an AutoSize label wrap; MinimumSize keeps the box the same width as
+    # the other controls even when every line happens to be short
+    $lblBox.MaximumSize = New-Object System.Drawing.Size(742, 0)
+    $lblBox.MinimumSize = New-Object System.Drawing.Size(742, 0)
+    $form.Controls.Add($lblBox)
+    # The new height is applied on the next layout pass - force it before measuring
+    $lblBox.PerformLayout()
 
     # ---- Step 4: start ----
-    $y6 = 618
+    # Everything below is placed from the real bottom edge of the notice box, so a three-line
+    # English text can never push the buttons or the footer out of the window again.
+    $boxH = $lblBox.Height
+    if ($boxH -lt 40) { $boxH = 80 }      # layout not measured yet (should not happen): safe fallback
+    $y6 = $y5 + $boxH + 14
     $sep = New-Object System.Windows.Forms.Panel
     $sep.Location = New-Object System.Drawing.Point(26, $y6)
     $sep.Size = New-Object System.Drawing.Size(746, 1)
@@ -2776,6 +2796,7 @@ function Show-Gui {
     $lblSt.ForeColor = [System.Drawing.Color]::FromArgb(86, 96, 112)
     $lblSt.Location = New-Object System.Drawing.Point(198, ($y6 + 40))
     $lblSt.Size = New-Object System.Drawing.Size(576, 20)
+    $lblSt.AutoEllipsis = $true
     $form.Controls.Add($lblSt)
 
     $log = New-Object System.Windows.Forms.TextBox
@@ -2795,7 +2816,19 @@ function Show-Gui {
     $lblFoot.ForeColor = [System.Drawing.Color]::FromArgb(150, 158, 170)
     $lblFoot.Location = New-Object System.Drawing.Point(30, ($y6 + 182))
     $lblFoot.Size = New-Object System.Drawing.Size(742, 18)
+    $lblFoot.AutoEllipsis = $true
     $form.Controls.Add($lblFoot)
+
+    # [layout fix] Window height follows the real content instead of the hard-coded 876px, so a longer
+    # English block never pushes the footer out of view. Capped to the screen working area; if the
+    # content still does not fit (very small screen), the form scrolls instead of clipping.
+    $needH = $y6 + 258
+    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    if ($needH -gt ($wa.Height - 16)) {
+        $needH = $wa.Height - 16
+        $form.AutoScroll = $true
+    }
+    $form.Size = New-Object System.Drawing.Size(800, $needH)
 
     function AddLog([string]$m) {
         $stamp = (Get-Date).ToString('HH:mm:ss')
