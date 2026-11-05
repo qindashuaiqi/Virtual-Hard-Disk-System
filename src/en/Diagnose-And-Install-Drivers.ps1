@@ -19,7 +19,7 @@
 # ============================================================
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '1.31'
+$Script:Version = '1.32'
 try { $Host.UI.RawUI.WindowTitle = "New System Diagnose and Install Drivers v$($Script:Version) - connectsegabot" } catch {}
 
 function Say {
@@ -191,7 +191,15 @@ foreach ($item in $installQueue) {
         try { $t = [IO.File]::ReadAllText($log, [Text.Encoding]::Default) } catch {}
         $e = ''
         try { if (Test-Path ($log + '.err')) { $e = [IO.File]::ReadAllText($log + '.err', [Text.Encoding]::Default) } } catch {}
-        $okAdd = ($t -match '已成功添加|successfully added|已成功导入')
+        # [v1.32] English pnputil says "Driver package added successfully" (added BEFORE
+        # successfully) - the old pattern 'successfully added' never matched, so every
+        # install was reported as "not added" even when it worked. Also fall back to
+        # checking the driver store, so a verdict no longer depends on localized text.
+        $okAdd = ($t -match '已成功添加|已成功导入|added successfully|successfully added')
+        if (-not $okAdd) {
+            try { $enumTxt = (& pnputil.exe /enum-drivers 2>&1 | Out-String) } catch { $enumTxt = '' }
+            if ($enumTxt -and $enumTxt.IndexOf($leaf, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $okAdd = $true }
+        }
         $leaf = Split-Path -Leaf $inf
         if ($okAdd) { Say ("      {0} => added" -f $leaf) 'Green' } else { Say ("      {0} => not added" -f $leaf) 'Yellow' }
         Add-Line ("--- {0}" -f $inf)
