@@ -38,7 +38,7 @@ rem 改成先提权、再用普通 -File 运行脚本，任何错误都留在窗
 fltmc >nul 2>&1
 if errorlevel 1 (
     echo   正在申请管理员权限，请在弹窗中选「是」...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' } catch { exit 9 }"
     if errorlevel 9 (
         echo.
         echo   [错误] 没能获得管理员权限。
@@ -103,7 +103,7 @@ rem %~dp0 结尾带反斜杠，补一个 . 就没有了，避免写 if "%X:~-1%"
 rem 下面一行里不要出现任何嵌套引号。
 set "ORIGIN=%~dp0."
 
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%"%PSARGS%
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%"%PSARGS% %*
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (

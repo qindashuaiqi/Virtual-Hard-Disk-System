@@ -6,7 +6,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '1.31'
+$Script:Version = '1.32'
 $Script:ProductName = '虚拟硬盘系统'
 
 function Test-Admin {

@@ -14,7 +14,7 @@ rem 改成先提权、再用普通 -File 运行脚本，任何错误都留在窗口里。
 fltmc >nul 2>&1
 if errorlevel 1 (
     echo   正在申请管理员权限，请在弹窗中选「是」...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' } catch { exit 9 }"
     if errorlevel 9 (
         echo.
         echo   [错误] 没能获得管理员权限。
@@ -196,20 +196,20 @@ set "PS1FILE=%WORKDIR%\新系统-诊断并装驱动.ps1"
 >> "%B64FILE%" echo Ty5GaWxlXTo6UmVhZEFsbFRleHQoJGxvZywgW1RleHQuRW5jb2RpbmddOjpEZWZhdWx0KSB9IGNh
 >> "%B64FILE%" echo dGNoIHt9DQogICAgICAgICRlID0gJycNCiAgICAgICAgdHJ5IHsgaWYgKFRlc3QtUGF0aCAoJGxv
 >> "%B64FILE%" echo ZyArICcuZXJyJykpIHsgJGUgPSBbSU8uRmlsZV06OlJlYWRBbGxUZXh0KCRsb2cgKyAnLmVycics
->> "%B64FILE%" echo IFtUZXh0LkVuY29kaW5nXTo6RGVmYXVsdCkgfSB9IGNhdGNoIHt9DQogICAgICAgICMgW3YxLjMy
->> "%B64FILE%" echo XSDoi7HmlofniYggcG5wdXRpbCDnmoTmiJDlip/mj5DnpLrmmK8gIkRyaXZlciBwYWNrYWdlIGFk
->> "%B64FILE%" echo ZGVkIHN1Y2Nlc3NmdWxseSINCiAgICAgICAgIyDvvIhhZGRlZCDlnKggc3VjY2Vzc2Z1bGx5IOWJ
->> "%B64FILE%" echo jemdou+8ie+8jOaXp+WMuemFjeS4suawuOi/nOaJk+S4jeS4re+8jOWvvOiHtOWunumZheijheS4
->> "%B64FILE%" echo iuS6huS5n+aKpeOAjOacqua3u+WKoOOAjeOAgg0KICAgICAgICAjIOWPpuWkluWKoOmpseWKqOS7
->> "%B64FILE%" echo k+W6k+WFnOW6le+8muaWh+Wtl+WMuemFjeS4jeS4iuaXtuafpSBwbnB1dGlsIC9lbnVtLWRyaXZl
->> "%B64FILE%" echo cnMg56Gu6K6k77yM5LiN5YaN5L6d6LWW5pys5Zyw5YyW5paH5a2X44CCDQogICAgICAgICRva0Fk
->> "%B64FILE%" echo ZCA9ICgkdCAtbWF0Y2ggJ+W3suaIkOWKn+a3u+WKoHzlt7LmiJDlip/lr7zlhaV8YWRkZWQgc3Vj
->> "%B64FILE%" echo Y2Vzc2Z1bGx5fHN1Y2Nlc3NmdWxseSBhZGRlZCcpDQogICAgICAgIGlmICgtbm90ICRva0FkZCkg
->> "%B64FILE%" echo ew0KICAgICAgICAgICAgdHJ5IHsgJGVudW1UeHQgPSAoJiBwbnB1dGlsLmV4ZSAvZW51bS1kcml2
->> "%B64FILE%" echo ZXJzIDI+JjEgfCBPdXQtU3RyaW5nKSB9IGNhdGNoIHsgJGVudW1UeHQgPSAnJyB9DQogICAgICAg
->> "%B64FILE%" echo ICAgICBpZiAoJGVudW1UeHQgLWFuZCAkZW51bVR4dC5JbmRleE9mKCRsZWFmLCBbU3RyaW5nQ29t
->> "%B64FILE%" echo cGFyaXNvbl06Ok9yZGluYWxJZ25vcmVDYXNlKSAtZ2UgMCkgeyAkb2tBZGQgPSAkdHJ1ZSB9DQog
->> "%B64FILE%" echo ICAgICAgIH0NCiAgICAgICAgJGxlYWYgPSBTcGxpdC1QYXRoIC1MZWFmICRpbmYNCiAgICAgICAg
+>> "%B64FILE%" echo IFtUZXh0LkVuY29kaW5nXTo6RGVmYXVsdCkgfSB9IGNhdGNoIHt9DQogICAgICAgICRsZWFmID0g
+>> "%B64FILE%" echo U3BsaXQtUGF0aCAtTGVhZiAkaW5mDQogICAgICAgICMgW3YxLjMyXSDoi7HmlofniYggcG5wdXRp
+>> "%B64FILE%" echo bCDnmoTmiJDlip/mj5DnpLrmmK8gIkRyaXZlciBwYWNrYWdlIGFkZGVkIHN1Y2Nlc3NmdWxseSIN
+>> "%B64FILE%" echo CiAgICAgICAgIyDvvIhhZGRlZCDlnKggc3VjY2Vzc2Z1bGx5IOWJjemdou+8ie+8jOaXp+WMuemF
+>> "%B64FILE%" echo jeS4suawuOi/nOaJk+S4jeS4re+8jOWvvOiHtOWunumZheijheS4iuS6huS5n+aKpeOAjOacqua3
+>> "%B64FILE%" echo u+WKoOOAjeOAgg0KICAgICAgICAjIOWPpuWkluWKoOmpseWKqOS7k+W6k+WFnOW6le+8muaWh+Wt
+>> "%B64FILE%" echo l+WMuemFjeS4jeS4iuaXtuafpSBwbnB1dGlsIC9lbnVtLWRyaXZlcnMg56Gu6K6k77yM5LiN5YaN
+>> "%B64FILE%" echo 5L6d6LWW5pys5Zyw5YyW5paH5a2X44CCDQogICAgICAgICRva0FkZCA9ICgkdCAtbWF0Y2ggJ+W3
+>> "%B64FILE%" echo suaIkOWKn+a3u+WKoHzlt7LmiJDlip/lr7zlhaV8YWRkZWQgc3VjY2Vzc2Z1bGx5fHN1Y2Nlc3Nm
+>> "%B64FILE%" echo dWxseSBhZGRlZCcpDQogICAgICAgIGlmICgtbm90ICRva0FkZCkgew0KICAgICAgICAgICAgdHJ5
+>> "%B64FILE%" echo IHsgJGVudW1UeHQgPSAoJiBwbnB1dGlsLmV4ZSAvZW51bS1kcml2ZXJzIDI+JjEgfCBPdXQtU3Ry
+>> "%B64FILE%" echo aW5nKSB9IGNhdGNoIHsgJGVudW1UeHQgPSAnJyB9DQogICAgICAgICAgICBpZiAoJGVudW1UeHQg
+>> "%B64FILE%" echo LWFuZCAkZW51bVR4dC5JbmRleE9mKCRsZWFmLCBbU3RyaW5nQ29tcGFyaXNvbl06Ok9yZGluYWxJ
+>> "%B64FILE%" echo Z25vcmVDYXNlKSAtZ2UgMCkgeyAkb2tBZGQgPSAkdHJ1ZSB9DQogICAgICAgIH0NCiAgICAgICAg
 >> "%B64FILE%" echo aWYgKCRva0FkZCkgeyBTYXkgKCIgICAgICB7MH0gPT4g5bey5re75YqgIiAtZiAkbGVhZikgJ0dy
 >> "%B64FILE%" echo ZWVuJyB9IGVsc2UgeyBTYXkgKCIgICAgICB7MH0gPT4g5pyq5re75YqgIiAtZiAkbGVhZikgJ1ll
 >> "%B64FILE%" echo bGxvdycgfQ0KICAgICAgICBBZGQtTGluZSAoIi0tLSB7MH0iIC1mICRpbmYpDQogICAgICAgIEFk
@@ -289,7 +289,7 @@ rem %~dp0 结尾带反斜杠，补一个 . 就没有了，避免写 if "%X:~-1%"=="\" 这种易错的判
 rem 下面一行里不要出现任何嵌套引号。
 set "ORIGIN=%~dp0."
 
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%"
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%" %*
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (

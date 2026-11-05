@@ -16,7 +16,7 @@ rem error on screen.
 fltmc >nul 2>&1
 if errorlevel 1 (
     echo   Requesting administrator rights - confirm the UAC prompt...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' } catch { exit 9 }"
     if errorlevel 9 (
         echo.
         echo   [ERROR] Could not get administrator rights.
@@ -203,21 +203,21 @@ set "PS1FILE=%WORKDIR%\Diagnose-And-Install-Drivers.ps1"
 >> "%B64FILE%" echo dCA9IFtJTy5GaWxlXTo6UmVhZEFsbFRleHQoJGxvZywgW1RleHQuRW5jb2RpbmddOjpEZWZhdWx0
 >> "%B64FILE%" echo KSB9IGNhdGNoIHt9DQogICAgICAgICRlID0gJycNCiAgICAgICAgdHJ5IHsgaWYgKFRlc3QtUGF0
 >> "%B64FILE%" echo aCAoJGxvZyArICcuZXJyJykpIHsgJGUgPSBbSU8uRmlsZV06OlJlYWRBbGxUZXh0KCRsb2cgKyAn
->> "%B64FILE%" echo LmVycicsIFtUZXh0LkVuY29kaW5nXTo6RGVmYXVsdCkgfSB9IGNhdGNoIHt9DQogICAgICAgICMg
->> "%B64FILE%" echo W3YxLjMyXSBFbmdsaXNoIHBucHV0aWwgc2F5cyAiRHJpdmVyIHBhY2thZ2UgYWRkZWQgc3VjY2Vz
->> "%B64FILE%" echo c2Z1bGx5IiAoYWRkZWQgQkVGT1JFDQogICAgICAgICMgc3VjY2Vzc2Z1bGx5KSAtIHRoZSBvbGQg
->> "%B64FILE%" echo cGF0dGVybiAnc3VjY2Vzc2Z1bGx5IGFkZGVkJyBuZXZlciBtYXRjaGVkLCBzbyBldmVyeQ0KICAg
->> "%B64FILE%" echo ICAgICAjIGluc3RhbGwgd2FzIHJlcG9ydGVkIGFzICJub3QgYWRkZWQiIGV2ZW4gd2hlbiBpdCB3
->> "%B64FILE%" echo b3JrZWQuIEFsc28gZmFsbCBiYWNrIHRvDQogICAgICAgICMgY2hlY2tpbmcgdGhlIGRyaXZlciBz
->> "%B64FILE%" echo dG9yZSwgc28gYSB2ZXJkaWN0IG5vIGxvbmdlciBkZXBlbmRzIG9uIGxvY2FsaXplZCB0ZXh0Lg0K
->> "%B64FILE%" echo ICAgICAgICAkb2tBZGQgPSAoJHQgLW1hdGNoICflt7LmiJDlip/mt7vliqB85bey5oiQ5Yqf5a+8
->> "%B64FILE%" echo 5YWlfGFkZGVkIHN1Y2Nlc3NmdWxseXxzdWNjZXNzZnVsbHkgYWRkZWQnKQ0KICAgICAgICBpZiAo
->> "%B64FILE%" echo LW5vdCAkb2tBZGQpIHsNCiAgICAgICAgICAgIHRyeSB7ICRlbnVtVHh0ID0gKCYgcG5wdXRpbC5l
->> "%B64FILE%" echo eGUgL2VudW0tZHJpdmVycyAyPiYxIHwgT3V0LVN0cmluZykgfSBjYXRjaCB7ICRlbnVtVHh0ID0g
->> "%B64FILE%" echo JycgfQ0KICAgICAgICAgICAgaWYgKCRlbnVtVHh0IC1hbmQgJGVudW1UeHQuSW5kZXhPZigkbGVh
->> "%B64FILE%" echo ZiwgW1N0cmluZ0NvbXBhcmlzb25dOjpPcmRpbmFsSWdub3JlQ2FzZSkgLWdlIDApIHsgJG9rQWRk
->> "%B64FILE%" echo ID0gJHRydWUgfQ0KICAgICAgICB9DQogICAgICAgICRsZWFmID0gU3BsaXQtUGF0aCAtTGVhZiAk
->> "%B64FILE%" echo aW5mDQogICAgICAgIGlmICgkb2tBZGQpIHsgU2F5ICgiICAgICAgezB9ID0+IGFkZGVkIiAtZiAk
+>> "%B64FILE%" echo LmVycicsIFtUZXh0LkVuY29kaW5nXTo6RGVmYXVsdCkgfSB9IGNhdGNoIHt9DQogICAgICAgICRs
+>> "%B64FILE%" echo ZWFmID0gU3BsaXQtUGF0aCAtTGVhZiAkaW5mDQogICAgICAgICMgW3YxLjMyXSBFbmdsaXNoIHBu
+>> "%B64FILE%" echo cHV0aWwgc2F5cyAiRHJpdmVyIHBhY2thZ2UgYWRkZWQgc3VjY2Vzc2Z1bGx5IiAoYWRkZWQgQkVG
+>> "%B64FILE%" echo T1JFDQogICAgICAgICMgc3VjY2Vzc2Z1bGx5KSAtIHRoZSBvbGQgcGF0dGVybiAnc3VjY2Vzc2Z1
+>> "%B64FILE%" echo bGx5IGFkZGVkJyBuZXZlciBtYXRjaGVkLCBzbyBldmVyeQ0KICAgICAgICAjIGluc3RhbGwgd2Fz
+>> "%B64FILE%" echo IHJlcG9ydGVkIGFzICJub3QgYWRkZWQiIGV2ZW4gd2hlbiBpdCB3b3JrZWQuIEFsc28gZmFsbCBi
+>> "%B64FILE%" echo YWNrIHRvDQogICAgICAgICMgY2hlY2tpbmcgdGhlIGRyaXZlciBzdG9yZSwgc28gYSB2ZXJkaWN0
+>> "%B64FILE%" echo IG5vIGxvbmdlciBkZXBlbmRzIG9uIGxvY2FsaXplZCB0ZXh0Lg0KICAgICAgICAkb2tBZGQgPSAo
+>> "%B64FILE%" echo JHQgLW1hdGNoICflt7LmiJDlip/mt7vliqB85bey5oiQ5Yqf5a+85YWlfGFkZGVkIHN1Y2Nlc3Nm
+>> "%B64FILE%" echo dWxseXxzdWNjZXNzZnVsbHkgYWRkZWQnKQ0KICAgICAgICBpZiAoLW5vdCAkb2tBZGQpIHsNCiAg
+>> "%B64FILE%" echo ICAgICAgICAgIHRyeSB7ICRlbnVtVHh0ID0gKCYgcG5wdXRpbC5leGUgL2VudW0tZHJpdmVycyAy
+>> "%B64FILE%" echo PiYxIHwgT3V0LVN0cmluZykgfSBjYXRjaCB7ICRlbnVtVHh0ID0gJycgfQ0KICAgICAgICAgICAg
+>> "%B64FILE%" echo aWYgKCRlbnVtVHh0IC1hbmQgJGVudW1UeHQuSW5kZXhPZigkbGVhZiwgW1N0cmluZ0NvbXBhcmlz
+>> "%B64FILE%" echo b25dOjpPcmRpbmFsSWdub3JlQ2FzZSkgLWdlIDApIHsgJG9rQWRkID0gJHRydWUgfQ0KICAgICAg
+>> "%B64FILE%" echo ICB9DQogICAgICAgIGlmICgkb2tBZGQpIHsgU2F5ICgiICAgICAgezB9ID0+IGFkZGVkIiAtZiAk
 >> "%B64FILE%" echo bGVhZikgJ0dyZWVuJyB9IGVsc2UgeyBTYXkgKCIgICAgICB7MH0gPT4gbm90IGFkZGVkIiAtZiAk
 >> "%B64FILE%" echo bGVhZikgJ1llbGxvdycgfQ0KICAgICAgICBBZGQtTGluZSAoIi0tLSB7MH0iIC1mICRpbmYpDQog
 >> "%B64FILE%" echo ICAgICAgIEFkZC1MaW5lICgiICAgIHJlc3VsdDogIiArICQoaWYgKCRva0FkZCkgeyAnYWRkZWQn
@@ -300,7 +300,7 @@ rem avoids the fragile  if "%X:~-1%"=="\"  comparison in a batch file.
 rem No nested quoting anywhere below on purpose.
 set "ORIGIN=%~dp0."
 
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%"
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%" %*
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (

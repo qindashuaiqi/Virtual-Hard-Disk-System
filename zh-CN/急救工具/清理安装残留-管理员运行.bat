@@ -14,7 +14,7 @@ rem 改成先提权、再用普通 -File 运行脚本，任何错误都留在窗口里。
 fltmc >nul 2>&1
 if errorlevel 1 (
     echo   正在申请管理员权限，请在弹窗中选「是」...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' } catch { exit 9 }"
     if errorlevel 9 (
         echo.
         echo   [错误] 没能获得管理员权限。
@@ -65,7 +65,7 @@ set "PS1FILE=%WORKDIR%\清理安装残留-管理员运行.ps1"
 >> "%B64FILE%" echo l+eFp+edgOi+k+aWh+S7tuWQjQ0KIyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09
 >> "%B64FILE%" echo PT09PT09PT09PT09PT09PT09PT09PT09PT0NCg0KcGFyYW0oDQogICAgW3N0cmluZ10kT3JpZ2lu
 >> "%B64FILE%" echo RGlyID0gJycNCikNCg0KJEVycm9yQWN0aW9uUHJlZmVyZW5jZSA9ICdDb250aW51ZScNCiRTY3Jp
->> "%B64FILE%" echo cHQ6VmVyc2lvbiA9ICcxLjMxJw0KJFNjcmlwdDpPcmlnaW5EaXIgPSAkT3JpZ2luRGlyDQoNCnRy
+>> "%B64FILE%" echo cHQ6VmVyc2lvbiA9ICcxLjMyJw0KJFNjcmlwdDpPcmlnaW5EaXIgPSAkT3JpZ2luRGlyDQoNCnRy
 >> "%B64FILE%" echo eSB7ICRIb3N0LlVJLlJhd1VJLldpbmRvd1RpdGxlID0gIua4heeQhuWuieijheaui+eVmSB2JCgk
 >> "%B64FILE%" echo U2NyaXB0OlZlcnNpb24pIC0gY29ubmVjdHNlZ2Fib3QiIH0gY2F0Y2gge30NCg0KZnVuY3Rpb24g
 >> "%B64FILE%" echo U2F5IHsNCiAgICBwYXJhbShbc3RyaW5nXSRUZXh0LCBbc3RyaW5nXSRDb2xvciA9ICdHcmF5JykN
@@ -390,7 +390,7 @@ rem %~dp0 结尾带反斜杠，补一个 . 就没有了，避免写 if "%X:~-1%"=="\" 这种易错的判
 rem 下面一行里不要出现任何嵌套引号。
 set "ORIGIN=%~dp0."
 
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%" -OriginDir "%ORIGIN%"
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%" -OriginDir "%ORIGIN%" %*
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (

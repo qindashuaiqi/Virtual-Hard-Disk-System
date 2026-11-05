@@ -14,7 +14,7 @@ rem 改成先提权、再用普通 -File 运行脚本，任何错误都留在窗口里。
 fltmc >nul 2>&1
 if errorlevel 1 (
     echo   正在申请管理员权限，请在弹窗中选「是」...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' } catch { exit 9 }"
     if errorlevel 9 (
         echo.
         echo   [错误] 没能获得管理员权限。
@@ -69,7 +69,7 @@ set "PS1FILE=%WORKDIR%\新系统-清理幽灵显卡.ps1"
 >> "%B64FILE%" echo kOWKn+Wwsei3s+i/h++8jOetieS6juawuOi/nOS4jeS/ruOAgg0KIw0KIyDnu5Pmnpzmlofku7bv
 >> "%B64FILE%" echo vJo85p+Q5Liq55uYPjpc5pi+5Y2h6K+K5patLnR4dA0KIyA9PT09PT09PT09PT09PT09PT09PT09
 >> "%B64FILE%" echo PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0NCg0KJEVycm9yQWN0aW9uUHJl
->> "%B64FILE%" echo ZmVyZW5jZSA9ICdDb250aW51ZScNCiRTY3JpcHQ6VmVyc2lvbiA9ICcxLjMxJw0KdHJ5IHsgJEhv
+>> "%B64FILE%" echo ZmVyZW5jZSA9ICdDb250aW51ZScNCiRTY3JpcHQ6VmVyc2lvbiA9ICcxLjMyJw0KdHJ5IHsgJEhv
 >> "%B64FILE%" echo c3QuVUkuUmF3VUkuV2luZG93VGl0bGUgPSAi5paw57O757ufIOaYvuWNoeS9k+ajgCB2JCgkU2Ny
 >> "%B64FILE%" echo aXB0OlZlcnNpb24pIC0gY29ubmVjdHNlZ2Fib3QiIH0gY2F0Y2gge30NCg0KZnVuY3Rpb24gU2F5
 >> "%B64FILE%" echo IHsNCiAgICBwYXJhbShbc3RyaW5nXSRUZXh0LCBbc3RyaW5nXSRDb2xvciA9ICdHcmF5JykNCiAg
@@ -376,7 +376,7 @@ rem %~dp0 结尾带反斜杠，补一个 . 就没有了，避免写 if "%X:~-1%"=="\" 这种易错的判
 rem 下面一行里不要出现任何嵌套引号。
 set "ORIGIN=%~dp0."
 
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%"
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%" %*
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (

@@ -191,6 +191,7 @@ foreach ($item in $installQueue) {
         try { $t = [IO.File]::ReadAllText($log, [Text.Encoding]::Default) } catch {}
         $e = ''
         try { if (Test-Path ($log + '.err')) { $e = [IO.File]::ReadAllText($log + '.err', [Text.Encoding]::Default) } } catch {}
+        $leaf = Split-Path -Leaf $inf
         # [v1.32] English pnputil says "Driver package added successfully" (added BEFORE
         # successfully) - the old pattern 'successfully added' never matched, so every
         # install was reported as "not added" even when it worked. Also fall back to
@@ -200,7 +201,6 @@ foreach ($item in $installQueue) {
             try { $enumTxt = (& pnputil.exe /enum-drivers 2>&1 | Out-String) } catch { $enumTxt = '' }
             if ($enumTxt -and $enumTxt.IndexOf($leaf, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $okAdd = $true }
         }
-        $leaf = Split-Path -Leaf $inf
         if ($okAdd) { Say ("      {0} => added" -f $leaf) 'Green' } else { Say ("      {0} => not added" -f $leaf) 'Yellow' }
         Add-Line ("--- {0}" -f $inf)
         Add-Line ("    result: " + $(if ($okAdd) { 'added' } else { 'not added' }))

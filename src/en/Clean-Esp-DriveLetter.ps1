@@ -1,7 +1,7 @@
 ﻿# Remove a leftover ESP drive letter (S:)
 # Run as administrator. Only the "access path" is removed, no partition data is touched - completely safe.
 # Author: connectsegabot
-$Script:Version = '1.31'
+$Script:Version = '1.32'
 Write-Host ("Clean leftover drive letter v{0} - author: connectsegabot" -f $Script:Version)
 Write-Host "=========================================="
 $espGuid = 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b'

@@ -22,7 +22,7 @@
 # ============================================================
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '1.31'
+$Script:Version = '1.32'
 try { $Host.UI.RawUI.WindowTitle = "New System GPU Check-up v$($Script:Version) - connectsegabot" } catch {}
 
 function Say {

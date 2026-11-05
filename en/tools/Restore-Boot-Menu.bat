@@ -16,7 +16,7 @@ rem error on screen.
 fltmc >nul 2>&1
 if errorlevel 1 (
     echo   Requesting administrator rights - confirm the UAC prompt...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' } catch { exit 9 }"
     if errorlevel 9 (
         echo.
         echo   [ERROR] Could not get administrator rights.
@@ -63,7 +63,7 @@ set "PS1FILE=%WORKDIR%\Restore-Boot-Menu.ps1"
 >> "%B64FILE%" echo aGUgbnVtYmVyIG9mIHNlY29uZHMgeW91IHdhbnQ6DQogICAgICBiY2RlZGl0IC9zZXQge2Jvb3Rt
 >> "%B64FILE%" echo Z3J9IGRpc3BsYXlib290bWVudSBObw0KICAgICAgYmNkZWRpdCAvc2V0IHtib290bWdyfSB0aW1l
 >> "%B64FILE%" echo b3V0IDUNCiM+DQoNCiRFcnJvckFjdGlvblByZWZlcmVuY2UgPSAnU3RvcCcNCiRTY3JpcHQ6VmVy
->> "%B64FILE%" echo c2lvbiA9ICcxLjMxJw0KDQpmdW5jdGlvbiBUZXN0LUFkbWluIHsNCiAgICAkaWQgPSBbU2VjdXJp
+>> "%B64FILE%" echo c2lvbiA9ICcxLjMyJw0KDQpmdW5jdGlvbiBUZXN0LUFkbWluIHsNCiAgICAkaWQgPSBbU2VjdXJp
 >> "%B64FILE%" echo dHkuUHJpbmNpcGFsLldpbmRvd3NJZGVudGl0eV06OkdldEN1cnJlbnQoKQ0KICAgICRwID0gTmV3
 >> "%B64FILE%" echo LU9iamVjdCBTZWN1cml0eS5QcmluY2lwYWwuV2luZG93c1ByaW5jaXBhbCgkaWQpDQogICAgcmV0
 >> "%B64FILE%" echo dXJuICRwLklzSW5Sb2xlKFtTZWN1cml0eS5QcmluY2lwYWwuV2luZG93c0J1aWx0SW5Sb2xlXTo6
@@ -142,7 +142,7 @@ rem avoids the fragile  if "%X:~-1%"=="\"  comparison in a batch file.
 rem No nested quoting anywhere below on purpose.
 set "ORIGIN=%~dp0."
 
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%"
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%" %*
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (

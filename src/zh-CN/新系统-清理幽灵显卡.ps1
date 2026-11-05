@@ -22,7 +22,7 @@
 # ============================================================
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '1.31'
+$Script:Version = '1.32'
 try { $Host.UI.RawUI.WindowTitle = "新系统 显卡体检 v$($Script:Version) - connectsegabot" } catch {}
 
 function Say {

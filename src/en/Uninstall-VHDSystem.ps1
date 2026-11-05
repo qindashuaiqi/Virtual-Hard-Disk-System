@@ -6,7 +6,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '1.31'
+$Script:Version = '1.32'
 $Script:ProductName = 'Virtual Hard Disk System'
 
 function Test-Admin {

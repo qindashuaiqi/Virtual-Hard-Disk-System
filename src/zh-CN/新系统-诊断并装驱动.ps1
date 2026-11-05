@@ -191,6 +191,7 @@ foreach ($item in $installQueue) {
         try { $t = [IO.File]::ReadAllText($log, [Text.Encoding]::Default) } catch {}
         $e = ''
         try { if (Test-Path ($log + '.err')) { $e = [IO.File]::ReadAllText($log + '.err', [Text.Encoding]::Default) } } catch {}
+        $leaf = Split-Path -Leaf $inf
         # [v1.32] 英文版 pnputil 的成功提示是 "Driver package added successfully"
         # （added 在 successfully 前面），旧匹配串永远打不中，导致实际装上了也报「未添加」。
         # 另外加驱动仓库兜底：文字匹配不上时查 pnputil /enum-drivers 确认，不再依赖本地化文字。
@@ -199,7 +200,6 @@ foreach ($item in $installQueue) {
             try { $enumTxt = (& pnputil.exe /enum-drivers 2>&1 | Out-String) } catch { $enumTxt = '' }
             if ($enumTxt -and $enumTxt.IndexOf($leaf, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $okAdd = $true }
         }
-        $leaf = Split-Path -Leaf $inf
         if ($okAdd) { Say ("      {0} => 已添加" -f $leaf) 'Green' } else { Say ("      {0} => 未添加" -f $leaf) 'Yellow' }
         Add-Line ("--- {0}" -f $inf)
         Add-Line ("    结果: " + $(if ($okAdd) { '已添加' } else { '未添加' }))

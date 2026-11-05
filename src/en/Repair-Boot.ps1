@@ -69,7 +69,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Script:Version = '1.31'
+$Script:Version = '1.32'
 $Script:TempDir = [System.IO.Path]::GetTempPath()
 if (-not $Script:TempDir) { $Script:TempDir = 'C:\Windows\Temp\' }
 $Script:LogDate = (Get-Date).ToString('yyyyMMdd')
@@ -943,6 +943,28 @@ try {
     if ($diskNum -lt 0) { throw 'Failed to mount the virtual disk (the system did not pick up the disk).' }
     $mounted = $true
     Write-Log "Virtual disk number: $diskNum"
+
+    # [v1.32 final gate] Mount-Vhd may have fallen back to "unique file name" matching, which can
+    # still pick a different disk that happens to share the file name (same name, another folder).
+    # The very next steps delete the ESP/MSR inside this disk, so re-check that the disk's Location
+    # really is this file before touching anything. Mismatch -> throw, nothing deleted.
+    $guardDisk = $null
+    try { $guardDisk = Get-Disk -Number $diskNum -EA Stop } catch {}
+    if ($guardDisk) {
+        $guardLoc = [string]$guardDisk.Location
+        if ($guardLoc.StartsWith('\\?\')) { $guardLoc = $guardLoc.Substring(4) }
+        $guardLoc = $guardLoc.Trim()
+        $guardWant = [System.IO.Path]::GetFullPath($VhdPath)
+        if (-not [string]::Equals($guardLoc, $guardWant, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw ("Disk$diskNum does not point at the file being repaired.`n`n" +
+                   "  Disk location: $($guardDisk.Location)`n" +
+                   "  Expected file: $guardWant`n`n" +
+                   "Nothing was modified - another virtual disk may share this file name. Pass the exact path with -VhdPath.")
+        }
+        Write-Log "Final gate passed: Disk$diskNum location matches $guardWant"
+    } else {
+        throw ("The mounted disk Disk$diskNum could not be read back; refusing to modify it. Nothing was changed.")
+    }
 
     # ---------- Delete the ESP inside the vhdx, leaving a single partition ----------
     $vparts = @(Get-Partition -DiskNumber $diskNum -EA SilentlyContinue)

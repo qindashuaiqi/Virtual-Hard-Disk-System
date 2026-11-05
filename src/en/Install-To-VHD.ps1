@@ -40,7 +40,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Script:OriginDir = $OriginDir
-$Script:Version = '1.31'
+$Script:Version = '1.32'
 $Script:ProductName = 'Virtual Hard Disk System'
 
 # ---- These must be defined before the exception hook is registered ----
@@ -2441,6 +2441,28 @@ exit 0
             Write-Log 'vhdx dismounted (bcdedit requires the vhd= device to be written while it is not mounted)'
         } catch {
             Write-Log "Failed to dismount the vhdx: $($_.Exception.Message)" 'WARN'
+        }
+
+        # [v1.32] Write a PROVISIONAL state file BEFORE the boot entry step. If bcdedit is so broken
+        # that neither /copy nor /create produces a GUID (the worst case - exactly when Repair is most
+        # needed), the old code wrote no state file at all and Repair refused to touch the disk. This
+        # marker proves "this program created this disk, files are applied, the entry is still missing",
+        # so the repair tools can find and fix it. It is overwritten by the full state below on success.
+        $statePath = [System.IO.Path]::ChangeExtension($vhdPath, '.boot.txt')
+        try {
+            $provisional = @(
+                "# $($Script:ProductName) - provisional state (files applied, boot entry not yet registered)",
+                "Status=FilesApplied",
+                "Version=$($Script:Version)",
+                "Name=$safeName",
+                "VhdPath=$vhdPath",
+                "Guid=",
+                "Created=$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
+            )
+            [System.IO.File]::WriteAllLines($statePath, $provisional, (New-Object System.Text.UTF8Encoding $false))
+            Write-Log "Provisional state file written (so repair tools can find this disk even if the boot entry step fails): $statePath"
+        } catch {
+            Write-Log "Could not write the provisional state file: $($_.Exception.Message)" 'WARN'
         }
 
         $be = Install-BootEntry -VhdFullPath $vhdPath -EditionName $EditionName -DisplayName $safeName
