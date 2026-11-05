@@ -1,0 +1,20 @@
+# build / verify leftovers
+__pycache__/
+*.pyc
+*.log
+
+# test artefacts that must never end up in a release
+_fakewim_test.*
+_realwim_test.*
+_xmlbug_test.*
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# local user images (never commit multi-GB Windows images)
+*.wim
+*.esd
+*.iso
+*.vhdx
