@@ -166,6 +166,21 @@ function Get-AnsiEncoding {
     }
 }
 
+# bcdedit 的输出走控制台代码页，打不出来的字会变成 "?"。英文启动器开头是 chcp 437，
+# 中文路径于是整个变成 "?"，写对了也被判成写错。
+function Test-BcdTextSame {
+    param([string]$Want, [string]$Got)
+    if ($null -eq $Got) { return $false }
+    if ($Got -eq $Want) { return $true }
+    if ($Got.Length -ne $Want.Length) { return $false }
+    for ($i = 0; $i -lt $Want.Length; $i++) {
+        if ($Got[$i] -eq $Want[$i]) { continue }
+        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
+        return $false
+    }
+    return $true
+}
+
 # 调 diskpart。$Lines 是命令数组，返回 @{ Ok; Text; Path; Error }
 function Invoke-Diskpart {
     param([string[]]$Lines, [string]$Tag = 'dp')
@@ -228,12 +243,38 @@ function Mount-Vhd {
     Write-Log "attach vdisk => $($r.Text)"
     Start-Sleep -Milliseconds 1500
 
-    $num = -1
-    $leaf = [System.IO.Path]::GetFileName($Path)
-    foreach ($d in (Get-Disk -EA SilentlyContinue)) {
-        if ($d.Location -and $d.Location -like "*$leaf*") { $num = $d.Number; break }
+    # [审计 P0-2] 先按完整路径找，再按唯一的文件名找；绝不"取第一个 Location 含这个名字的盘"。
+    # 调用方会删掉返回的那块盘里的 ESP/MSR，同名不同目录的另一块盘会被毁。
+    $all = @(Get-Disk -EA SilentlyContinue)
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $leaf = [System.IO.Path]::GetFileName($full)
+    $norm = {
+        param($p)
+        if (-not $p) { return '' }
+        $s = [string]$p
+        if ($s.StartsWith('\\?\')) { $s = $s.Substring(4) }
+        return $s.Trim()
     }
-    return $num
+
+    $exact = @($all | Where-Object {
+        $l = & $norm $_.Location
+        if (-not $l) { return $false }
+        return [string]::Equals($l, $full, [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($exact.Count -eq 1) { Write-Log "按完整路径命中 Disk$($exact[0].Number)"; return $exact[0].Number }
+    if ($exact.Count -gt 1) { throw "有两块盘都声称来自同一个文件（$full），没有动任何东西。" }
+
+    $byName = @($all | Where-Object {
+        $l = & $norm $_.Location
+        if (-not $l) { return $false }
+        return ([System.IO.Path]::GetFileName($l) -eq $leaf)
+    })
+    if ($byName.Count -eq 1) { Write-Log "按文件名唯一命中 Disk$($byName[0].Number)"; return $byName[0].Number }
+    if ($byName.Count -gt 1) {
+        $lines = ($byName | ForEach-Object { '    磁盘 ' + $_.Number + ': ' + $_.Location }) -join "`n"
+        throw ("机器上有多个挂载中的虚拟硬盘都叫 '$leaf'：`n$lines`n`n不替你挑，没有动任何东西。")
+    }
+    return -1
 }
 
 function Dismount-VhdSafe {
@@ -502,10 +543,10 @@ function Test-BcdEntryForVhd {
     $r = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $Guid) -Tag 'probe'
     if (-not $r.Ok) { return $out }      # 条目不存在 → 「菜单里没有它」
     $out.Exists = $true
-    $m = [regex]::Match($r.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+    $m = [regex]::Match($r.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
     if ($m.Success) { $out.Dev = $m.Groups[1].Value.Trim() }
     $back = ConvertFrom-BcdDevice $out.Dev
-    $out.DevOk = [bool]($back -and ($back -ieq $VhdPath))
+    $out.DevOk = [bool]($back -and (Test-BcdTextSame $VhdPath $back))
     return $out
 }
 
@@ -561,7 +602,20 @@ function Select-VhdForRepair {
         Write-Log ("    [{0} 分] {1}  ({2} GB)  {3}" -f $score, $f.FullName, [math]::Round($f.Length / 1GB, 1), $why)
     }
 
-    if ($scored.Count -eq 1) { return @{ Path = $scored[0].Path; All = $scored } }
+    # [审计 P0-3] 以前全机只有一块虚拟盘就直接拿它开工，连状态文件都不看。
+    # 那块盘很可能是 Hyper-V 的虚拟机盘或别人放的备份，而修复流程会删掉它里面的 ESP/MSR，
+    # 删完那台虚拟机就起不来了。状态文件（.boot.txt）是"这个程序装的"唯一凭据，
+    # 没有就得让用户自己点名。
+    if ($scored.Count -eq 1) {
+        if ($scored[0].Score -le 0) {
+            throw (("只找到一块虚拟硬盘，但它不是这个程序装的（没有状态文件）：`n`n" +
+                    "    {0}`n`n" +
+                    "没有动它——它可能是 Hyper-V 的盘，或者是备份。`n`n" +
+                    "如果确定就是它（比如安装中断，状态文件还没写出来），请手动指定：`n" +
+                    "    修复启动菜单-管理员运行.bat -VhdPath `"{0}`"") -f $scored[0].Path)
+        }
+        return @{ Path = $scored[0].Path; All = $scored }
+    }
 
     $sorted = @($scored | Sort-Object -Property @{ Expression = 'Score'; Descending = $true },
                                                  @{ Expression = 'Time';  Descending = $true })
@@ -1095,7 +1149,7 @@ try {
     # ---------- 校验 1：设备路径逐字核对 ----------
     $check = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $guid) -Tag 'verify'
     $devNow = ''
-    $mv = [regex]::Match($check.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+    $mv = [regex]::Match($check.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
     if ($mv.Success) { $devNow = $mv.Groups[1].Value.Trim() }
     if ($devNow -notmatch '(?i)vhd=') {
         throw ("启动条目里没写进 vhd= 设备路径。`n`n" +
@@ -1113,7 +1167,7 @@ try {
         [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'osdevice', $vhdDev) -Tag 'fix-dev')
         $check = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $guid) -Tag 'verify2'
         $devNow = ''
-        $mv = [regex]::Match($check.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+        $mv = [regex]::Match($check.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
         if ($mv.Success) { $devNow = $mv.Groups[1].Value.Trim() }
         $backPath = ConvertFrom-BcdDevice $devNow
         if (-not $backPath -or ($backPath -ine $VhdPath)) {
@@ -1134,13 +1188,18 @@ try {
     $md = [regex]::Match($check.Raw, '(?im)^\s*(?:description|描述)\s+(.+)$')
     if ($md.Success) { $descNow = $md.Groups[1].Value.Trim() }
     if ($descNow -ne $desc) {
-        # 中文写不进去时（命令行编码问题）退到纯英文，别让菜单显示成问号
-        $safeDesc = 'Windows (VHD) ' + [System.IO.Path]::GetFileNameWithoutExtension($VhdPath)
-        $safeDesc = ($safeDesc -replace '[^\x20-\x7E]', '').Trim()
-        if (-not $safeDesc) { $safeDesc = 'Windows (VHD)' }
-        Write-Log ("菜单文字没能正确写入（读回「{0}」），改用「{1}」" -f $descNow, $safeDesc) 'WARN'
-        [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'description', $safeDesc) -Tag 'desc-en')
-        $desc = $safeDesc
+        # 回读里是 "?" 只是控制台打不出中文，不要因为显示问题把名字换成英文
+        if (($descNow -replace '[^\x20-\x7E]', '?') -eq ($desc -replace '[^\x20-\x7E]', '?')) {
+            Write-Log "菜单文字被控制台代码页遮住了，保留「$desc」" 'WARN'
+        } else {
+            # 中文写不进去时（命令行编码问题）退到纯英文，别让菜单显示成问号
+            $safeDesc = 'Windows (VHD) ' + [System.IO.Path]::GetFileNameWithoutExtension($VhdPath)
+            $safeDesc = ($safeDesc -replace '[^\x20-\x7E]', '').Trim()
+            if (-not $safeDesc) { $safeDesc = 'Windows (VHD)' }
+            Write-Log ("菜单文字没能正确写入（读回「{0}」），改用「{1}」" -f $descNow, $safeDesc) 'WARN'
+            [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'description', $safeDesc) -Tag 'desc-en')
+            $desc = $safeDesc
+        }
     }
 
     # ---------- 新条目确认可用之后，才删旧条目 ----------

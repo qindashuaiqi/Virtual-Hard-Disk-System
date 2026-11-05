@@ -46,6 +46,21 @@ function Invoke-Bcd {
     return @{ Ok = (($code -eq 0) -and (-not $bad)); Code = $code; Text = $clean; Raw = $txt }
 }
 
+# bcdedit 的输出走控制台代码页，打不出来的字会变成 "?"。英文启动器开头是 chcp 437，
+# 中文路径于是整个变成 "?"，写对了也被判成写错。
+function Test-BcdTextSame {
+    param([string]$Want, [string]$Got)
+    if ($null -eq $Got) { return $false }
+    if ($Got -eq $Want) { return $true }
+    if ($Got.Length -ne $Want.Length) { return $false }
+    for ($i = 0; $i -lt $Want.Length; $i++) {
+        if ($Got[$i] -eq $Want[$i]) { continue }
+        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
+        return $false
+    }
+    return $true
+}
+
 # 完整路径 -> BCD 的 vhd= 写法。必须保留中间子目录：
 #   D:\虚拟磁盘\maimai.vhdx  ->  vhd=[D:]\虚拟磁盘\maimai.vhdx
 function Get-VhdBcdDevice {
@@ -219,12 +234,13 @@ foreach ($it in $items) {
     }
 
     # 核对 device 指向的路径
-    $dm = [regex]::Match($en.Raw, '(?im)^\s*(?:device|设备)\s+(\S.*?)\s*$')
+    # 不依赖字段名（德语 Gerät、日语 デバイス、中文 设备）：带 vhd= 的只有 device 那一行
+    $dm = [regex]::Match($en.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
     $curDev = ''
     if ($dm.Success) { $curDev = $dm.Groups[1].Value.Trim() }
     $curFull = Get-FullPathFromBcdDevice $curDev
 
-    if ($curFull -eq $wantFull) {
+    if (Test-BcdTextSame $wantFull $curFull) {
         Write-Log "指向正确：$curDev" 'OK'
         $okCount++
     } else {
@@ -232,16 +248,17 @@ foreach ($it in $items) {
         [void](Invoke-Bcd -BcdArgs @('/set', $guid, 'device',   $wantDev) -Tag 'fix-device')
         [void](Invoke-Bcd -BcdArgs @('/set', $guid, 'osdevice', $wantDev) -Tag 'fix-osdevice')
         $chk = Invoke-Bcd -BcdArgs @('/enum', $guid) -Tag 'recheck'
-        $dm2 = [regex]::Match($chk.Raw, '(?im)^\s*(?:device|设备)\s+(\S.*?)\s*$')
+        $dm2 = [regex]::Match($chk.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
         $nowDev = ''
         if ($dm2.Success) { $nowDev = $dm2.Groups[1].Value.Trim() }
         $nowFull = Get-FullPathFromBcdDevice $nowDev
-        if ($nowFull -eq $wantFull) {
+        if (Test-BcdTextSame $wantFull $nowFull) {
             Write-Log "已改正：$nowDev" 'OK'
             $fixedCount++
         } else {
             Write-Log ("改完还是不对，现在 [{0}]" -f $nowDev) 'ERR'
-            Write-Log '多半是 bcdedit 处理不了路径里的中文。把虚拟磁盘挪到纯英文目录（如 D:\VHD）再重新装一次最稳。' 'ERR'
+            Write-Log '如果那里是「?」而路径本来有中文，只是控制台代码页的显示问题：先 chcp 936 再 bcdedit /enum 看一眼。' 'ERR'
+            Write-Log '如果确实指到别处，把虚拟磁盘挪到纯英文目录（如 D:\VHD）再重新装一次最稳。' 'ERR'
             $failCount++
             continue
         }

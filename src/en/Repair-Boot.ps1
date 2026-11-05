@@ -166,6 +166,23 @@ function Get-AnsiEncoding {
     }
 }
 
+
+# bcdedit prints through the console code page, so a character the page cannot carry comes
+# back as "?". The English launcher runs "chcp 437", which turned every Chinese character in
+# a path into "?" and made a correct BCD write look like a wrong path.
+function Test-BcdTextSame {
+    param([string]$Want, [string]$Got)
+    if ($null -eq $Got) { return $false }
+    if ($Got -eq $Want) { return $true }
+    if ($Got.Length -ne $Want.Length) { return $false }
+    for ($i = 0; $i -lt $Want.Length; $i++) {
+        if ($Got[$i] -eq $Want[$i]) { continue }
+        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
+        return $false
+    }
+    return $true
+}
+
 # Call diskpart. $Lines is the command array; returns @{ Ok; Text; Path; Error }
 function Invoke-Diskpart {
     param([string[]]$Lines, [string]$Tag = 'dp')
@@ -228,12 +245,39 @@ function Mount-Vhd {
     Write-Log "attach vdisk => $($r.Text)"
     Start-Sleep -Milliseconds 1500
 
-    $num = -1
-    $leaf = [System.IO.Path]::GetFileName($Path)
-    foreach ($d in (Get-Disk -EA SilentlyContinue)) {
-        if ($d.Location -and $d.Location -like "*$leaf*") { $num = $d.Number; break }
+    # [audit P0-2] Full path first, then a unique file name - never "the first disk whose Location
+    # contains this name". The caller deletes the ESP/MSR inside whatever disk comes back, so a
+    # second virtual disk with the same file name in another folder would be damaged.
+    $all = @(Get-Disk -EA SilentlyContinue)
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $leaf = [System.IO.Path]::GetFileName($full)
+    $norm = {
+        param($p)
+        if (-not $p) { return '' }
+        $s = [string]$p
+        if ($s.StartsWith('\\?\')) { $s = $s.Substring(4) }
+        return $s.Trim()
     }
-    return $num
+
+    $exact = @($all | Where-Object {
+        $l = & $norm $_.Location
+        if (-not $l) { return $false }
+        return [string]::Equals($l, $full, [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($exact.Count -eq 1) { Write-Log "Matched Disk$($exact[0].Number) by full path"; return $exact[0].Number }
+    if ($exact.Count -gt 1) { throw "Two disks claim the same file ($full); nothing was modified." }
+
+    $byName = @($all | Where-Object {
+        $l = & $norm $_.Location
+        if (-not $l) { return $false }
+        return ([System.IO.Path]::GetFileName($l) -eq $leaf)
+    })
+    if ($byName.Count -eq 1) { Write-Log "Matched Disk$($byName[0].Number) by file name (unique)"; return $byName[0].Number }
+    if ($byName.Count -gt 1) {
+        $lines = ($byName | ForEach-Object { '    Disk ' + $_.Number + ': ' + $_.Location }) -join "`n"
+        throw ("More than one mounted virtual disk is called '$leaf':`n$lines`n`nRefusing to pick one - nothing was modified.")
+    }
+    return -1
 }
 
 function Dismount-VhdSafe {
@@ -502,10 +546,10 @@ function Test-BcdEntryForVhd {
     $r = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $Guid) -Tag 'probe'
     if (-not $r.Ok) { return $out }      # entry does not exist -> "the menu has no such entry"
     $out.Exists = $true
-    $m = [regex]::Match($r.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+    $m = [regex]::Match($r.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
     if ($m.Success) { $out.Dev = $m.Groups[1].Value.Trim() }
     $back = ConvertFrom-BcdDevice $out.Dev
-    $out.DevOk = [bool]($back -and ($back -ieq $VhdPath))
+    $out.DevOk = [bool]($back -and (Test-BcdTextSame $VhdPath $back))
     return $out
 }
 
@@ -561,7 +605,20 @@ function Select-VhdForRepair {
         Write-Log ("    [{0} pts] {1}  ({2} GB)  {3}" -f $score, $f.FullName, [math]::Round($f.Length / 1GB, 1), $why)
     }
 
-    if ($scored.Count -eq 1) { return @{ Path = $scored[0].Path; All = $scored } }
+    # [audit P0-3] A single virtual disk used to be taken unconditionally, even without a state file.
+    # That disk may well be a Hyper-V machine disk or a backup copy, and the repair flow deletes the
+    # ESP/MSR inside it - which leaves that machine unbootable. The state file (.boot.txt) is the only
+    # proof that this program created the disk, so without one the user has to name it explicitly.
+    if ($scored.Count -eq 1) {
+        if ($scored[0].Score -le 0) {
+            throw (("Only one virtual disk was found, but this program did not install it (no state file):`n`n" +
+                    "    {0}`n`n" +
+                    "It was NOT modified - it could belong to Hyper-V or be a backup copy.`n`n" +
+                    "If you are sure it is the system to repair (for example the install was interrupted before the state file was written), name it explicitly:`n" +
+                    "    Repair-Boot-Menu.bat -VhdPath `"{0}`"") -f $scored[0].Path)
+        }
+        return @{ Path = $scored[0].Path; All = $scored }
+    }
 
     $sorted = @($scored | Sort-Object -Property @{ Expression = 'Score'; Descending = $true },
                                                  @{ Expression = 'Time';  Descending = $true })
@@ -1095,7 +1152,7 @@ try {
     # ---------- Check 1: compare the device path character by character ----------
     $check = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $guid) -Tag 'verify'
     $devNow = ''
-    $mv = [regex]::Match($check.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+    $mv = [regex]::Match($check.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
     if ($mv.Success) { $devNow = $mv.Groups[1].Value.Trim() }
     if ($devNow -notmatch '(?i)vhd=') {
         throw ("The vhd= device path was not written into the boot entry.`n`n" +
@@ -1107,16 +1164,16 @@ try {
     # Reverse-parse it into a real path and compare it character by character with the file on disk.
     $backPath = ConvertFrom-BcdDevice $devNow
     Write-Log ("Entry check: device={0}  reverse-parsed={1}" -f $devNow, $backPath)
-    if ($backPath -and ($backPath -ine $VhdPath)) {
+    if ($backPath -and -not (Test-BcdTextSame $VhdPath $backPath)) {
         Write-Log "Wrong target (should be $VhdPath), rewriting once" 'WARN'
         [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'device', $vhdDev) -Tag 'fix-dev')
         [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'osdevice', $vhdDev) -Tag 'fix-dev')
         $check = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $guid) -Tag 'verify2'
         $devNow = ''
-        $mv = [regex]::Match($check.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+        $mv = [regex]::Match($check.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
         if ($mv.Success) { $devNow = $mv.Groups[1].Value.Trim() }
         $backPath = ConvertFrom-BcdDevice $devNow
-        if (-not $backPath -or ($backPath -ine $VhdPath)) {
+        if (-not $backPath -or -not (Test-BcdTextSame $VhdPath $backPath)) {
             throw ("The device path cannot be written, or was overwritten after writing.`n`n" +
                    "Expected: $vhdDev`n" +
                    "Read back: $devNow`n`n" +
@@ -1134,13 +1191,18 @@ try {
     $md = [regex]::Match($check.Raw, '(?im)^\s*(?:description|描述)\s+(.+)$')
     if ($md.Success) { $descNow = $md.Groups[1].Value.Trim() }
     if ($descNow -ne $desc) {
-        # When non-ASCII text cannot be written (command line encoding), fall back to plain ASCII so the menu does not show question marks
-        $safeDesc = 'Windows (VHD) ' + [System.IO.Path]::GetFileNameWithoutExtension($VhdPath)
-        $safeDesc = ($safeDesc -replace '[^\x20-\x7E]', '').Trim()
-        if (-not $safeDesc) { $safeDesc = 'Windows (VHD)' }
-        Write-Log ("Menu text could not be written correctly (read back ""{0}""), using ""{1}"" instead" -f $descNow, $safeDesc) 'WARN'
-        [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'description', $safeDesc) -Tag 'desc-en')
-        $desc = $safeDesc
+        # A "?" in the readback is only the console code page; do not rename a good entry
+        if (($descNow -replace '[^\x20-\x7E]', '?') -eq ($desc -replace '[^\x20-\x7E]', '?')) {
+            Write-Log ('Menu text masked by the console code page, keeping "' + $desc + '"') 'WARN'
+        } else {
+            # When non-ASCII text cannot be written (command line encoding), fall back to plain ASCII so the menu does not show question marks
+            $safeDesc = 'Windows (VHD) ' + [System.IO.Path]::GetFileNameWithoutExtension($VhdPath)
+            $safeDesc = ($safeDesc -replace '[^\x20-\x7E]', '').Trim()
+            if (-not $safeDesc) { $safeDesc = 'Windows (VHD)' }
+            Write-Log ("Menu text could not be written correctly (read back ""{0}""), using ""{1}"" instead" -f $descNow, $safeDesc) 'WARN'
+            [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'description', $safeDesc) -Tag 'desc-en')
+            $desc = $safeDesc
+        }
     }
 
     # ---------- Delete the old entry only after the new one is verified ----------

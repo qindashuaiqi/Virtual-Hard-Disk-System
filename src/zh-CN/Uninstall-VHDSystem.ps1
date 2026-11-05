@@ -17,11 +17,16 @@ function Test-Admin {
 
 function Request-Admin {
     try {
-        $psi = Join-Path $env:TEMP "uninstall-system-elevated.ps1"
+        # [审计 P1-8] 以前复制到固定名（uninstall-system-elevated.ps1）再提权执行。
+        # 那个目录同用户可写，同用户的其它进程可以提前放一个同名文件，提权后执行的就是它。
+        # 改成随机名，把"提前预置"这一半堵掉。复制→提权之间那点时间窗脚本关不掉，
+        # 要彻底解决只能给发布物做 Authenticode 签名。
+        $psi = Join-Path $env:TEMP ("uninstall-system-{0}.ps1" -f ([guid]::NewGuid().ToString('N').Substring(0, 12)))
         Copy-Item -LiteralPath $PSCommandPath -Destination $psi -Force
         Start-Process -FilePath 'powershell.exe' `
             -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$psi`"") `
             -Verb RunAs -Wait
+        Remove-Item -LiteralPath $psi -Force -ErrorAction SilentlyContinue
         return $true
     } catch {
         return $false
@@ -348,7 +353,11 @@ function Show-Gui {
                 foreach ($blk in $blocks) {
                     if ($blk -notmatch '(?:identifier|标识符)\s+(\{[0-9a-fA-F\-]+\})') { continue }
                     $g = $Matches[1]
-                    if ($blk -match [regex]::Escape($exactDev)) {
+                    # [chcp 437] 回读里路径的中文可能变成 "?"，两边都遮一下再比，
+                    # 否则条目匹配不上，卸载完菜单里会留一个孤儿项。
+                    $looseBlk = ($blk -replace '[^\x20-\x7E]', '?')
+                    $looseDev = ($exactDev -replace '[^\x20-\x7E]', '?')
+                    if ($looseBlk -match [regex]::Escape($looseDev)) {
                         [void]$hit.Add([PSCustomObject]@{ Guid = $g; Block = $blk })
                     }
                 }

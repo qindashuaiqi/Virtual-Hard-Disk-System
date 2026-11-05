@@ -109,12 +109,20 @@ set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" (
     echo.
     echo   [错误] 脚本退出码 %RC%。
+    echo          解压出的脚本留在这里，方便排查：
+    echo             %PS1FILE%
     echo          想看纯文本报告（不开窗口）：
     echo             powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1FILE%" -ConsoleMode
     echo.
     pause
     exit /b %RC%
 )
+
+rem [审计 P3-17] 成功结束后清理。以前只删 payload.b64 / payload.dat，
+rem   于是 TEMP 里每跑一次就多一个文件夹和一个 ps1，越积越多。
+rem   ps1 在脚本退出之后才删，运行期间不碰它。
+del "%PS1FILE%" >nul 2>&1
+rmdir "%WORKDIR%" >nul 2>&1
 %TAIL%
 exit /b 0
 '''

@@ -17,11 +17,17 @@ function Test-Admin {
 
 function Request-Admin {
     try {
-        $psi = Join-Path $env:TEMP "uninstall-system-elevated.ps1"
+        # [audit P1-8] This used to copy itself to a FIXED name (uninstall-system-elevated.ps1) in a
+        # user-writable folder and then elevate that path. Any process running as the same user could
+        # plant or replace that file beforehand, and the elevated run would execute it.
+        # A random name removes the "plant it in advance" half. The remaining copy-to-elevate race
+        # cannot be closed by a script at all - that needs an Authenticode signature.
+        $psi = Join-Path $env:TEMP ("uninstall-system-{0}.ps1" -f ([guid]::NewGuid().ToString('N').Substring(0, 12)))
         Copy-Item -LiteralPath $PSCommandPath -Destination $psi -Force
         Start-Process -FilePath 'powershell.exe' `
             -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$psi`"") `
             -Verb RunAs -Wait
+        Remove-Item -LiteralPath $psi -Force -ErrorAction SilentlyContinue
         return $true
     } catch {
         return $false
@@ -352,7 +358,11 @@ function Show-Gui {
                 foreach ($blk in $blocks) {
                     if ($blk -notmatch '(?:identifier|标识符)\s+(\{[0-9a-fA-F\-]+\})') { continue }
                     $g = $Matches[1]
-                    if ($blk -match [regex]::Escape($exactDev)) {
+                    # [chcp 437] The readback may show "?" where the path has non-ASCII characters,
+                    # so mask both sides before the exact match; otherwise the entry is left behind.
+                    $looseBlk = ($blk -replace '[^\x20-\x7E]', '?')
+                    $looseDev = ($exactDev -replace '[^\x20-\x7E]', '?')
+                    if ($looseBlk -match [regex]::Escape($looseDev)) {
                         [void]$hit.Add([PSCustomObject]@{ Guid = $g; Block = $blk })
                     }
                 }
