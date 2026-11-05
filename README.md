@@ -81,6 +81,17 @@ python src/build/make_bat_zh.py
 
 `make_bat_zh.py` expects the Chinese release layout (`急救工具\`); `make_bat_en.py` writes to `en\` and `en\tools\`.
 
+### Why a few Chinese tokens remain in the English sources
+
+The English sources are translated line by line (2076 CJK lines → English), with 48 lines deliberately left as-is because they are **not display text**:
+
+- `bcdedit` / `diskpart` / `pnputil` print localized output, so the matchers keep both spellings, e.g. `-match 'identifier|标识符'`, `-match 'completed successfully|操作成功完成'`;
+- legacy compatibility: the uninstaller still recognises `新系统.vhdx` and the driver tool still scans `新系统驱动`, so systems installed by old Chinese builds are found;
+- one input accept-list also takes `是` / `删除`.
+
+Removing them would break behaviour on Chinese Windows. Display strings, dialogs, logs and comments are fully English.
+
+
 ## How it works, and the traps it avoids
 
 ```
