@@ -116,9 +116,16 @@ rem and the file may exist as 0 bytes or half written, so an existence check is 
 set "NEED=3294"
 set "GOT=0"
 for %%A in ("%PS1FILE%") do if exist "%%A" set "GOT=%%~zA"
+rem NOTE: never put a half-width ) inside an echo line that lives inside a
+rem   parenthesised block. cmd treats it as the end of the block, the rest of
+rem   the line becomes garbage and the whole batch dies with
+rem   ". was unexpected at this time." before printing anything - measured
+rem   2026-11-05, this single line killed all 11 English bats on startup.
+rem   Colons, dashes and semicolons are safe; the Chinese build uses full-width
+rem   parens, which cmd does not treat as syntax, so it was never affected.
 if not "%GOT%"=="%NEED%" (
     echo.
-    echo   [ERROR] Self-extraction failed (expected %NEED% bytes, got %GOT% bytes).
+    echo   [ERROR] Self-extraction failed - expected %NEED% bytes, got %GOT% bytes.
     echo           Copy this file again, or disable antivirus temporarily and retry.
     echo.
     pause

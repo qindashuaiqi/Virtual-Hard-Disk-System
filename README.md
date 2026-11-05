@@ -61,7 +61,7 @@ Requirements: Windows 10 10240+ x64, administrator rights, an NTFS partition on 
 └─ src/
    ├─ en/              11 English PowerShell sources
    ├─ zh-CN/           11 Chinese PowerShell sources
-   └─ build/           make_bat_en.py · make_bat_zh.py · verify_en.py
+   └─ build/           make_bat_en.py · make_bat_zh.py · verify_en.py · selftest_bat.py
 ```
 
 The `.bat` files are **self-extracting wrappers**, not the logic: each one carries its PowerShell script as a base64 payload, decodes it into `%TEMP%` with `certutil`, verifies the byte count and re-launches elevated. That is why they work by double-click with no execution-policy fiddling — and why the sources live in `src/`.
@@ -75,11 +75,30 @@ python src/build/make_bat_en.py
 # verify every bat: ASCII only, CRLF, payload byte-identical to its ps1
 python src/build/verify_en.py
 
+# actually run every bat (UAC prompt suppressed, GUI launch stubbed out)
+python src/build/selftest_bat.py en
+python src/build/selftest_bat.py zh-CN
+
 # rebuild the Chinese bat files from src/zh-CN/*.ps1 (writes GBK, not ASCII)
 python src/build/make_bat_zh.py
 ```
 
 `make_bat_zh.py` expects the Chinese release layout (`急救工具\`); `make_bat_en.py` writes to `en\` and `en\tools\`.
+
+`verify_en.py` only proves the payload is intact. It does **not** prove the batch
+file runs — a byte-perfect launcher can still die on a cmd parsing quirk. So
+`selftest_bat.py` executes each one, with the elevation branch short-circuited
+(no UAC prompt during a test run) and the final PowerShell launch replaced by a
+marker echo, then requires: exit code 0, marker printed, no
+`unexpected at this time`, and the extracted payload files deleted.
+
+That check exists because v1.x shipped with every English launcher dead:
+`echo [ERROR] Self-extraction failed (expected ... bytes)` sat inside an
+`if not ... ( ... )` block, the half-width `)` terminated the block early, and
+cmd aborted with `. was unexpected at this time.` before printing anything. The
+window closed instantly, no log was written, and the symptom looked exactly like
+"the installer crashes". Never put a half-width `)` in an `echo` inside a
+parenthesised block — the lint in `selftest_bat.py` now fails the build on it.
 
 ### Why a few Chinese tokens remain in the English sources
 

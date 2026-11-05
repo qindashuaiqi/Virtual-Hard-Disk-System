@@ -1198,6 +1198,11 @@ set "GOT=0"
 for %%A in ("%PS1FILE%") do if exist "%%A" set "GOT=%%~zA"
 if not "%GOT%"=="%NEED%" (
     echo.
+    rem Keep the FULL-WIDTH parens on this line. cmd treats a half-width ) as the
+    rem end of the enclosing block even inside echo text, and the batch dies with
+    rem ". was unexpected at this time." without printing anything - that bug
+    rem killed every English launcher in v1.x. The Chinese build was spared only
+    rem because （ and ） are not syntax to cmd.
     echo   [错误] 自解压失败（期望 %NEED% 字节，实际 %GOT% 字节）。
     echo          请重新复制本文件，或临时关闭杀毒软件后重试。
     echo.
