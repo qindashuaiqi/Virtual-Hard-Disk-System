@@ -32,6 +32,17 @@ The new system is a real disk to Windows: it takes drivers, software, Windows Up
 - **Reversible.** The BCD is exported before any change, and the uninstaller restores `timeout` / `displaybootmenu` to their original values.
 - **Recovery toolkit.** Nine focused tools for the failure modes found on real hardware: no menu after install, wrong vhdx path in the entry, leftover drive letters, drivers missing in the new system, an empty GPU in Task Manager, half-finished installs.
 
+## Changelog
+
+### v1.32
+
+- **BCD non-ASCII read-back fixed.** `chcp 437` made `bcdedit` echo non-ASCII path characters as `?`, so a *correct* boot entry was reported as "wrong path". The check now tolerates `?` at non-ASCII positions and falls back to a `bcdedit /export` + UTF-16 lookup.
+- **Provisional state file.** A `.boot.txt` marker is written *before* the boot entry step, so the repair tool can find the disk even when bcdedit is so broken that neither `/copy` nor `/create` yields a GUID.
+- **Repair final gate.** Before deleting the ESP/MSR inside a vhdx, the disk's `Location` is re-checked against the target file — a same-named disk in another folder is no longer at risk.
+- **Driver tool "not added" false positive.** English `pnputil` says *"Driver package added successfully"*; the old pattern never matched. Added the correct wording plus a driver-store fallback, and fixed a use-before-assign on the leaf name.
+- **Launcher `.bat` forwards `%*`.** `Repair-Boot-Menu.bat -VhdPath "…"` now passes the argument through, including across the UAC elevation.
+- All tools bumped to v1.32.
+
 ## Quick start
 
 1. Download or clone this repository.
