@@ -213,13 +213,17 @@ function Get-SafeDiskName {
     return $n
 }
 
-# Can the Chinese name be encoded in GBK? If not, diskpart writes out ?, and the file cannot be created.
+# Can the name be encoded in the system ANSI code page? If not, diskpart writes it out with "?", the
+# file is created under the question-mark name and Test-Path on the real path fails.
+#
+# [audit P1-5] This used to hard-code GBK (936). On an English system (ACP 1252) a Chinese name passed
+# the check, yet diskpart wrote "???.vhdx" - "the name is valid but the creation fails", plus a junk
+# file. Now it uses exactly the encoding Invoke-Diskpart writes the script with.
 function Test-EncodableName {
     param([string]$Name)
     try {
-        $gbk = [System.Text.Encoding]::GetEncoding(936)
-        $bytes = $gbk.GetBytes($Name)
-        $back = $gbk.GetString($bytes)
+        $enc = Get-AnsiEncoding
+        $back = $enc.GetString($enc.GetBytes($Name))
         return ($back -eq $Name)
     } catch {
         return $false
@@ -276,6 +280,56 @@ function Get-FullPathFromBcdDevice {
     $m = [regex]::Match($Dev, '^vhd=\[([A-Za-z]):\]\\(.+)$')
     if (-not $m.Success) { return '' }
     return ("{0}:\{1}" -f $m.Groups[1].Value.ToUpper(), $m.Groups[2].Value)
+}
+
+# [audit P0-1] Find the disk that was just attached, by FULL PATH - never by file name alone.
+#
+# The hazard this replaces: "Location -like *<file name>*" picks any disk whose file has the same
+# name, and the caller then runs "select disk N; clean". With D:\A\WinVHD.vhdx and E:\Backup\WinVHD.vhdx
+# both present (a backup copy on another volume is enough), the wrong disk could be cleaned.
+#
+# Order, each step strictly safer than the next:
+#   1. Location equals the full path (case-insensitive, \\?\ prefix tolerated) -> accept
+#   2. Same file name, EXACTLY ONE candidate -> accept
+#   3. Same file name, several candidates -> throw, never pick one
+# Returns $null when nothing matched.
+function Resolve-VhdDisk {
+    param([string]$VhdPath, $Disks)
+    if (-not $VhdPath) { return $null }
+    $full = [System.IO.Path]::GetFullPath($VhdPath)
+    $leaf = [System.IO.Path]::GetFileName($full)
+
+    $clean = {
+        param($p)
+        if (-not $p) { return '' }
+        $s = [string]$p
+        if ($s.StartsWith('\\?\')) { $s = $s.Substring(4) }
+        return $s.Trim()
+    }
+
+    $exact = @($Disks | Where-Object {
+        $loc = & $clean $_.Location
+        if (-not $loc) { return $false }
+        return [string]::Equals($loc, $full, [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($exact.Count -eq 1) { return $exact[0] }
+    if ($exact.Count -gt 1) {
+        throw ("Two disks claim the same file ({0}):`n{1}`n`nNothing was touched." -f $full,
+               (($exact | ForEach-Object { '    Disk ' + $_.Number }) -join "`n"))
+    }
+
+    $byName = @($Disks | Where-Object {
+        $loc = & $clean $_.Location
+        if (-not $loc) { return $false }
+        return ([System.IO.Path]::GetFileName($loc) -eq $leaf)
+    })
+    if ($byName.Count -eq 1) { return $byName[0] }
+    if ($byName.Count -gt 1) {
+        throw ("More than one mounted virtual disk is called '{0}':`n{1}`n`nNothing was touched. " -f $leaf,
+               (($byName | ForEach-Object { '    Disk ' + $_.Number + ': ' + $_.Location }) -join "`n")) +
+              "Remove or rename the other one and run again."
+    }
+    return $null
 }
 
 # Scan every fixed NTFS drive for vhdx files (including subfolders, up to 3 levels deep).
@@ -370,7 +424,13 @@ function Test-TargetFolder {
         $r.Msg = 'Do not use . or .. in the path'; return $r
     }
     if (-not (Test-EncodableName $p)) {
-        $r.Msg = 'The path contains characters that GBK cannot encode (emoji etc.), please pick another one'; return $r
+        $r.Msg = 'The path contains characters that the system code page cannot represent (emoji etc.), please pick another one'; return $r
+    }
+    # [audit P1-6] Brackets are syntax characters in the BCD device path: vhd=[D:]\My (Games)\WinVHD.vhdx
+    # is truncated at ")" (see the v1.27 note in Get-SafeDiskName). The FILE name was always sanitised,
+    # but the FOLDER name used to pass straight through.
+    if ($p -match '[\(\)\[\]\{\}]') {
+        $r.Msg = 'The folder name contains ( ) [ ] or { } - a boot entry cannot express those. Please use a folder without brackets, for example D:\VHD'; return $r
     }
     if (-not (Test-Path -LiteralPath $p)) {
         $r.Msg = "This folder does not exist yet: $p"
@@ -457,8 +517,15 @@ function Get-DiskFreeBytes {
             return -1
         }
     }
-    $max = ($vals | Measure-Object -Maximum).Maximum
-    return [int64]$max
+    # [audit P3] Take the MINIMUM of the three sources, not the maximum. This number feeds the space
+    # preflight, and a preflight must never be optimistic: if Get-Volume, DriveInfo and Get-PSDrive
+    # disagree (quotas, filters, a stale cache), the smallest one is the one that will bite.
+    $min = [int64](($vals | Measure-Object -Minimum).Minimum)
+    $max = [int64](($vals | Measure-Object -Maximum).Maximum)
+    if ($max -gt 0 -and $min -lt ($max * 0.9)) {
+        Write-Log ("Free space sources disagree: min={0} max={1} bytes; using the smaller value" -f $min, $max) 'WARN'
+    }
+    return $min
 }
 
 function Get-FreeGB {
@@ -1051,6 +1118,19 @@ function Test-WimFile {
 
     if (-not $r.Name) { $r.Error = 'The image has no name information; it may not be a Windows image'; return $r }
 
+    # [audit P3] Reject a foreign architecture up front. An x86 / ARM64 image applies without complaint and
+    # then simply never boots, which the user only discovers after a 20 minute install and a reboot.
+    # WIM <ARCH> codes: 0 = x86, 5 = ARM, 6 = Itanium, 9 = x64, 12 = ARM64.
+    $mArch = [regex]::Match($xml, '<ARCH>(\d+)</ARCH>')
+    if ($mArch.Success) {
+        $arch = [int]$mArch.Groups[1].Value
+        if (@(0, 5, 6, 12) -contains $arch) {
+            $archName = switch ($arch) { 0 { 'x86 (32-bit)' } 5 { 'ARM' } 6 { 'Itanium' } 12 { 'ARM64' } }
+            $r.Error = "This image is $archName. Native-boot VHDX (vhd= in the boot entry) only works with x64 Windows - please pick an x64 image."
+            return $r
+        }
+    }
+
     # Only parse the edition table for multi-index images (a single-index image has exactly one, so there is no point)
     if ($r.Images -gt 1) { $r.IndexList = @(Get-ImageIndexList -Path $Path) }
 
@@ -1640,7 +1720,10 @@ function Install-BootEntry {
     # the menu shows the entry and selection dies with 0xc000000f, file not found. It must be caught right here.
     $wantFull = [System.IO.Path]::GetFullPath($VhdFullPath)
     for ($attempt = 1; $attempt -le 2; $attempt++) {
-        $dm = [regex]::Match($chk.Raw, '(?im)^\s*(?:device|设备)\s+(vhd=\[[^\r\n]+)')
+        # [audit P1-4] Do not depend on the field label: bcdedit prints "device", "Gerät", "デバイス"
+        # or "设备" depending on the host language, and a label mismatch read as "the path is wrong"
+        # even though it was written correctly. The only line carrying "vhd=[" is the device line.
+        $dm = [regex]::Match($chk.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
         $backFull = ''
         if ($dm.Success) { $backFull = Get-FullPathFromBcdDevice $dm.Groups[1].Value.Trim() }
         if ($backFull -eq $wantFull) { break }
@@ -1659,8 +1742,11 @@ function Install-BootEntry {
     # A non-ASCII description occasionally loses characters through the command line, so read it back.
     # v1.11: the criterion changed from "must contain the words Virtual System" to "must equal the $desc I wrote" -
     # a user-supplied name usually does not contain those words, and the old check misjudged good names as write failures.
+    #
+    # [audit P1-4] The check is now "the output contains exactly the text I wrote", not a label match:
+    # the label is "description", "Beschreibung", "説明" or "描述" depending on the host language.
     $descBack = ''
-    if ($chk.Raw -match '(?:description|描述)\s+(.+?)\r?\n') { $descBack = $matches[1].Trim() }
+    if ($chk.Raw -match [regex]::Escape($desc)) { $descBack = $desc }
     if ($descBack -ne $desc) {
         Write-Log "Description read back differs (expected ""$desc"", got ""$descBack""), retrying with an ASCII-only description" 'WARN'
         $asciiName = ($desc -replace '[^\x20-\x7E]', '').Trim()
@@ -1831,15 +1917,27 @@ function Invoke-Install {
             $allDisks = @(Get-Disk -EA SilentlyContinue)
             $vhdDisks = @($allDisks | Where-Object { ([string]$_.BusType) -eq 'File Backed Virtual' })
 
-            $hit = $vhdDisks | Where-Object { $_.Location -and $_.Location -like "*$($Script:VhdFileName)*" } | Select-Object -First 1
-            if ($hit) { $diskNum = $hit.Number; Write-Log "Matched Disk$diskNum by BusType+Location" }
-
-            if ($diskNum -lt 0) {
-                $hit = $allDisks | Where-Object { $_.Location -and $_.Location -like "*$($Script:VhdFileName)*" } | Select-Object -First 1
-                if ($hit) { $diskNum = $hit.Number; Write-Log "Matched Disk$diskNum by Location" }
+            $hit = Resolve-VhdDisk -VhdPath $vhdPath -Disks $vhdDisks
+            if (-not $hit) { $hit = Resolve-VhdDisk -VhdPath $vhdPath -Disks $allDisks }
+            if ($hit) {
+                $diskNum = $hit.Number
+                Write-Log "Matched Disk$diskNum by full path ($($hit.Location))"
             }
             if ($diskNum -lt 0 -and $vhdDisks.Count -eq 1) {
-                $diskNum = $vhdDisks[0].Number
+                # Last resort: exactly one file-backed virtual disk exists. Accept it only when it does not
+                # point at some other vhdx file - otherwise it belongs to another tool (Hyper-V, backup) and
+                # must never be cleaned.
+                $only = $vhdDisks[0]
+                $onlyLoc = [string]$only.Location
+                if ($onlyLoc) {
+                    if ($onlyLoc.StartsWith('\\?\')) { $onlyLoc = $onlyLoc.Substring(4) }
+                    $wantFull = [System.IO.Path]::GetFullPath($vhdPath)
+                    if ([System.IO.Path]::GetFileName($onlyLoc) -ne [System.IO.Path]::GetFileName($wantFull)) {
+                        throw ("The only mounted virtual disk (Disk{0}) comes from`n    {1}`nwhich is not the file this install created:`n    {2}`n`nNothing was touched." -f
+                               $only.Number, $onlyLoc, $wantFull)
+                    }
+                }
+                $diskNum = $only.Number
                 Write-Log "Only one virtual disk in the system, assuming Disk$diskNum"
             }
 
@@ -1886,6 +1984,29 @@ function Invoke-Install {
         #
         # Initialize-Disk only writes the GPT header and creates no MSR; New-Partition creates a single data partition.
         # clean is still delegated to diskpart (that path is verified working).
+        # [audit P0-1] Last gate before "clean", the single most destructive command in this program.
+        # If the disk reports which file it comes from, that file must be ours. A mismatch means the earlier
+        # match went wrong, and cleaning would destroy an unrelated disk's partition table.
+        if (-not $createdHere) {
+            throw "Refusing to clean Disk$($diskNum): this run did not create that file."
+        }
+        $guardDisk = $null
+        try { $guardDisk = Get-Disk -Number $diskNum -EA Stop } catch {}
+        if ($guardDisk) {
+            $gl = [string]$guardDisk.Location
+            if ($gl) {
+                if ($gl.StartsWith('\\?\')) { $gl = $gl.Substring(4) }
+                $wantFull = [System.IO.Path]::GetFullPath($vhdPath)
+                if (-not [string]::Equals($gl.Trim(), $wantFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw ("Refusing to clean Disk{0}.`n`nThat disk reports its file as:`n    {1}`nbut this install created:`n    {2}`n`nNothing was deleted. Another virtual disk with the same file name is probably mounted - remove it and try again." -f $diskNum, $gl, $wantFull)
+                }
+            }
+            $bt = [string]$guardDisk.BusType
+            if ($bt -and ($bt -notin @('File Backed Virtual', 'Virtual', 'Unknown'))) {
+                throw ("Refusing to clean Disk{0}: its bus type is '{1}', which is not a virtual disk." -f $diskNum, $bt)
+            }
+        }
+
         $dp = Invoke-Diskpart -Tag 'vhd' -Lines @(
             "select disk $diskNum",
             'clean',
@@ -2525,6 +2646,20 @@ function Show-Gui {
     $form.MaximizeBox = $false
     $form.BackColor = [System.Drawing.Color]::FromArgb(247, 248, 250)
     $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+
+    # [audit P1-7] An install runs on the UI thread for 10-40 minutes and keeps updating the controls.
+    # Closing the window in the middle disposed those controls and could skip the cleanup in finally.
+    # Refuse to close while a job is running (the status line explains why).
+    $form.Add_FormClosing({
+        param($sender, $e)
+        if ($script:Busy) {
+            $e.Cancel = $true
+            try {
+                $lblSt.Text = 'Installation in progress - the window cannot be closed until it finishes'
+                $lblSt.ForeColor = [System.Drawing.Color]::FromArgb(190, 80, 60)
+            } catch {}
+        }
+    })
 
     # ---- Header ----
     $hd = New-Object System.Windows.Forms.Panel

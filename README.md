@@ -40,7 +40,13 @@ The new system is a real disk to Windows: it takes drivers, software, Windows Up
 4. Accept the UAC prompt, pick your image, choose a folder and a name, click *Start installation*.
 5. Reboot and select the new name in the boot menu.
 
-Requirements: Windows 10 10240+ x64, administrator rights, an NTFS partition on a **local fixed disk**, and free space ≥ configured size + 5GB.
+Requirements: Windows 10 1607+ / Windows 11 on x64, administrator rights, an NTFS partition on a **local fixed disk**, and free space ≥ configured size + 5GB.
+
+Two host requirements worth reading twice:
+
+- **English or Chinese Windows only.** The output of `bcdedit` / `diskpart` is parsed from text, in those two languages. The boot entry itself is written through their machine-readable options, but the read-back verification would misfire on a German or Japanese host.
+- **The image must be x64.** An x86 or ARM64 image installs happily and then never boots; it is now rejected before anything is written.
+
 
 > Windows images are not bundled — prepare a `.wim`, `.esd` or `.iso` yourself.
 
@@ -56,7 +62,7 @@ Requirements: Windows 10 10240+ x64, administrator rights, an NTFS partition on 
 │  └─ tools/                   9 recovery tools
 ├─ zh-CN/              中文发行版（双击 开始.bat），结构同上
 ├─ docs/
-│  ├─ USER-GUIDE.md            full English guide
+│  ├─ USER-GUIDE.md            short English guide (the Chinese one is the complete manual)
 │  └─ USER-GUIDE.zh-CN.md      完整中文说明（含每一版的排障复盘）
 └─ src/
    ├─ en/              11 English PowerShell sources

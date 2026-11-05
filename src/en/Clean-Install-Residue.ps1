@@ -46,30 +46,52 @@ if (-not $admin) {
 }
 
 # ---------- 1. Kill leftover dism ----------
-Say "[1/3] Killing leftover dism.exe ..."
+#
+# [audit P3-16] This used to kill every dism.exe / DismHost on the machine without asking.
+# A user running DISM /RestoreHealth (or any other long DISM job) had it terminated mid-way.
+# It is still worth offering - a stuck DismHost is exactly what blocks a reinstall - but the
+# user gets to see what is running and decide.
+Say "[1/3] Looking for leftover dism.exe ..."
+$disms = @(Get-Process -Name dism, DismHost -ErrorAction SilentlyContinue)
 $killed = 0
-foreach ($p in @(Get-Process -Name dism, DismHost -ErrorAction SilentlyContinue)) {
-    try {
-        Stop-Process -Id $p.Id -Force -ErrorAction Stop
-        $killed++
-        Say ("      killed {0} (PID {1})" -f $p.ProcessName, $p.Id) 'DarkGray'
-    } catch {
-        Say ("      failed to kill {0} (PID {1}): {2}" -f $p.ProcessName, $p.Id, $_.Exception.Message) 'Yellow'
+if ($disms.Count -eq 0) {
+    Say "      none running" 'DarkGray'
+} else {
+    Say ("      {0} process(es): {1}" -f $disms.Count, (($disms | ForEach-Object { "$($_.ProcessName)(PID $($_.Id))" }) -join ', ')) 'Yellow'
+    Say "      Killing them also interrupts a DISM job you started yourself (for example /RestoreHealth)." 'DarkGray'
+    $ans = Read-Host "      Kill them? [y/N]"
+    if ($ans -match '^(?i)y(es)?$') {
+        foreach ($p in $disms) {
+            try {
+                Stop-Process -Id $p.Id -Force -ErrorAction Stop
+                $killed++
+                Say ("      killed {0} (PID {1})" -f $p.ProcessName, $p.Id) 'DarkGray'
+            } catch {
+                Say ("      failed to kill {0} (PID {1}): {2}" -f $p.ProcessName, $p.Id, $_.Exception.Message) 'Yellow'
+            }
+        }
+    } else {
+        Say "      skipped" 'DarkGray'
     }
 }
-if ($killed -eq 0) { Say "      no process needed killing" 'DarkGray' }
 Start-Sleep -Milliseconds 800
 
-# ---------- 2. Dismount every virtual disk ----------
-Say "[2/3] Dismounting mounted virtual disks ..."
+# ---------- 2. Dismount virtual disks ----------
+#
+# [audit P3-16] Same problem: every File Backed Virtual disk was detached, including a Hyper-V
+# machine disk or a VHD the user is working with. Nothing is lost by detaching, but the other
+# job breaks. Ask per disk, and never touch anything that is not the one we are here for.
+Say "[2/3] Mounted virtual disks ..."
 $vds = @(Get-Disk -ErrorAction SilentlyContinue | Where-Object { [string]$_.BusType -eq 'File Backed Virtual' })
 if ($vds.Count -eq 0) {
-    Say "      no mounted virtual disk" 'DarkGray'
+    Say "      none mounted" 'DarkGray'
 } else {
     foreach ($d in $vds) {
         $loc = [string]$d.Location
         Say ("      Disk {0}: {1}" -f $d.Number, $loc) 'DarkGray'
         if (-not $loc) { continue }
+        $ans = Read-Host ("      Detach this one? [y/N]")
+        if ($ans -notmatch '^(?i)y(es)?$') { Say "      kept mounted" 'DarkGray'; continue }
         $dpFile = Join-Path $env:TEMP ("detach_{0}.txt" -f $d.Number)
         @(
             "select vdisk file=`"$loc`"",

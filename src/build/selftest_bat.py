@@ -55,8 +55,20 @@ def lint_parens(text, name):
 
 
 def temp_dirs():
+    """Work folders created by the launchers.
+
+    The two builds use different prefixes (VHDSystem_ vs OneKeyInstall_), and this
+    function used to know only the English one - so every cleanup assertion for the
+    Chinese build was silently a no-op: the "created" set was always empty, nothing
+    was ever inspected, and the test still reported OK.
+    """
     root = os.environ.get('TEMP') or tempfile.gettempdir()
-    return set(p for p in glob.glob(os.path.join(root, 'VHDSystem_*')) if os.path.isdir(p))
+    found = set()
+    for prefix in ('VHDSystem_', 'OneKeyInstall_'):
+        for p in glob.glob(os.path.join(root, prefix + '*')):
+            if os.path.isdir(p):
+                found.add(p)
+    return found
 
 
 def run_one(path, encoding, scratch):
@@ -100,9 +112,11 @@ def run_one(path, encoding, scratch):
     if 'unexpected at this time' in after_text:
         problems.append('%s  cmd parse error: %s' % (name, after_text.strip().splitlines()[-1][:90]))
     for d in created:
-        leftovers = [f for f in os.listdir(d) if f.startswith('payload.')]
-        if leftovers:
-            problems.append('%s  payload not cleaned up: %s' % (name, ', '.join(leftovers)))
+        # A successful run now removes the unpacked ps1 and the whole work folder, so anything
+        # left behind means the batch stopped before the cleanup lines at the end.
+        leftovers = os.listdir(d) if os.path.isdir(d) else []
+        problems.append('%s  work folder not cleaned up: %s [%s]'
+                        % (name, d, ', '.join(leftovers) if leftovers else 'empty'))
 
     return ('FAIL' if problems else 'OK', name, problems)
 

@@ -46,22 +46,41 @@ if (-not $admin) {
 }
 
 # ---------- 1. 结束残留的 dism ----------
-Say "[1/3] 结束残留的 dism.exe ..."
+#
+# [审计 P3-16] 以前无条件把机器上所有 dism.exe / DismHost 全杀掉。
+# 用户自己正在跑 DISM /RestoreHealth 也会被中途打断。卡住的 DismHost 确实该清（正是它挡住重装），
+# 但先让用户看清楚在跑什么，再自己决定。
+Say "[1/3] 查找残留的 dism.exe ..."
+$disms = @(Get-Process -Name dism, DismHost -ErrorAction SilentlyContinue)
 $killed = 0
-foreach ($p in @(Get-Process -Name dism, DismHost -ErrorAction SilentlyContinue)) {
-    try {
-        Stop-Process -Id $p.Id -Force -ErrorAction Stop
-        $killed++
-        Say ("      已结束 {0} (PID {1})" -f $p.ProcessName, $p.Id) 'DarkGray'
-    } catch {
-        Say ("      结束 {0} (PID {1}) 失败：{2}" -f $p.ProcessName, $p.Id, $_.Exception.Message) 'Yellow'
+if ($disms.Count -eq 0) {
+    Say "      没有在跑的" 'DarkGray'
+} else {
+    Say ("      找到 {0} 个进程：{1}" -f $disms.Count, (($disms | ForEach-Object { "$($_.ProcessName)(PID $($_.Id))" }) -join '、')) 'Yellow'
+    Say "      结束它们也会打断你自己开的 DISM 任务（例如 /RestoreHealth）。" 'DarkGray'
+    $ans = Read-Host "      要结束吗？[y/N]"
+    if ($ans -match '^(?i)y(es)?$') {
+        foreach ($p in $disms) {
+            try {
+                Stop-Process -Id $p.Id -Force -ErrorAction Stop
+                $killed++
+                Say ("      已结束 {0} (PID {1})" -f $p.ProcessName, $p.Id) 'DarkGray'
+            } catch {
+                Say ("      结束 {0} (PID {1}) 失败：{2}" -f $p.ProcessName, $p.Id, $_.Exception.Message) 'Yellow'
+            }
+        }
+    } else {
+        Say "      已跳过" 'DarkGray'
     }
 }
-if ($killed -eq 0) { Say "      没有需要结束的进程" 'DarkGray' }
 Start-Sleep -Milliseconds 800
 
-# ---------- 2. 卸载所有虚拟磁盘 ----------
-Say "[2/3] 卸载挂着的虚拟磁盘 ..."
+# ---------- 2. 卸载虚拟磁盘 ----------
+#
+# [审计 P3-16] 同一个毛病：所有文件型虚拟盘一律卸载，包括 Hyper-V 的虚拟机盘、
+# 或者用户正在用的 VHD。卸载本身不丢数据，但会把别人正在做的事打断。
+# 改成一块一块问，不点头就不动。
+Say "[2/3] 挂载中的虚拟磁盘 ..."
 $vds = @(Get-Disk -ErrorAction SilentlyContinue | Where-Object { [string]$_.BusType -eq 'File Backed Virtual' })
 if ($vds.Count -eq 0) {
     Say "      没有挂着的虚拟磁盘" 'DarkGray'
@@ -70,6 +89,8 @@ if ($vds.Count -eq 0) {
         $loc = [string]$d.Location
         Say ("      Disk {0}: {1}" -f $d.Number, $loc) 'DarkGray'
         if (-not $loc) { continue }
+        $ans = Read-Host "      要卸载这一块吗？[y/N]"
+        if ($ans -notmatch '^(?i)y(es)?$') { Say "      保持挂载" 'DarkGray'; continue }
         $dpFile = Join-Path $env:TEMP ("detach_{0}.txt" -f $d.Number)
         @(
             "select vdisk file=`"$loc`"",

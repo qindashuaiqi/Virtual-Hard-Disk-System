@@ -228,12 +228,39 @@ function Mount-Vhd {
     Write-Log "attach vdisk => $($r.Text)"
     Start-Sleep -Milliseconds 1500
 
-    $num = -1
-    $leaf = [System.IO.Path]::GetFileName($Path)
-    foreach ($d in (Get-Disk -EA SilentlyContinue)) {
-        if ($d.Location -and $d.Location -like "*$leaf*") { $num = $d.Number; break }
+    # [audit P0-2] Full path first, then a unique file name - never "the first disk whose Location
+    # contains this name". The caller deletes the ESP/MSR inside whatever disk comes back, so a
+    # second virtual disk with the same file name in another folder would be damaged.
+    $all = @(Get-Disk -EA SilentlyContinue)
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $leaf = [System.IO.Path]::GetFileName($full)
+    $norm = {
+        param($p)
+        if (-not $p) { return '' }
+        $s = [string]$p
+        if ($s.StartsWith('\\?\')) { $s = $s.Substring(4) }
+        return $s.Trim()
     }
-    return $num
+
+    $exact = @($all | Where-Object {
+        $l = & $norm $_.Location
+        if (-not $l) { return $false }
+        return [string]::Equals($l, $full, [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($exact.Count -eq 1) { Write-Log "Matched Disk$($exact[0].Number) by full path"; return $exact[0].Number }
+    if ($exact.Count -gt 1) { throw "Two disks claim the same file ($full); nothing was modified." }
+
+    $byName = @($all | Where-Object {
+        $l = & $norm $_.Location
+        if (-not $l) { return $false }
+        return ([System.IO.Path]::GetFileName($l) -eq $leaf)
+    })
+    if ($byName.Count -eq 1) { Write-Log "Matched Disk$($byName[0].Number) by file name (unique)"; return $byName[0].Number }
+    if ($byName.Count -gt 1) {
+        $lines = ($byName | ForEach-Object { '    Disk ' + $_.Number + ': ' + $_.Location }) -join "`n"
+        throw ("More than one mounted virtual disk is called '$leaf':`n$lines`n`nRefusing to pick one - nothing was modified.")
+    }
+    return -1
 }
 
 function Dismount-VhdSafe {
@@ -561,7 +588,20 @@ function Select-VhdForRepair {
         Write-Log ("    [{0} pts] {1}  ({2} GB)  {3}" -f $score, $f.FullName, [math]::Round($f.Length / 1GB, 1), $why)
     }
 
-    if ($scored.Count -eq 1) { return @{ Path = $scored[0].Path; All = $scored } }
+    # [audit P0-3] A single virtual disk used to be taken unconditionally, even without a state file.
+    # That disk may well be a Hyper-V machine disk or a backup copy, and the repair flow deletes the
+    # ESP/MSR inside it - which leaves that machine unbootable. The state file (.boot.txt) is the only
+    # proof that this program created the disk, so without one the user has to name it explicitly.
+    if ($scored.Count -eq 1) {
+        if ($scored[0].Score -le 0) {
+            throw (("Only one virtual disk was found, but this program did not install it (no state file):`n`n" +
+                    "    {0}`n`n" +
+                    "It was NOT modified - it could belong to Hyper-V or be a backup copy.`n`n" +
+                    "If you are sure it is the system to repair (for example the install was interrupted before the state file was written), name it explicitly:`n" +
+                    "    Repair-Boot-Menu.bat -VhdPath `"{0}`"") -f $scored[0].Path)
+        }
+        return @{ Path = $scored[0].Path; All = $scored }
+    }
 
     $sorted = @($scored | Sort-Object -Property @{ Expression = 'Score'; Descending = $true },
                                                  @{ Expression = 'Time';  Descending = $true })

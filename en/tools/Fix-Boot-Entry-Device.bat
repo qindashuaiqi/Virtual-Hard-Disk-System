@@ -339,12 +339,20 @@ set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" (
     echo.
     echo   [ERROR] The script exited with code %RC%.
+    echo           The unpacked script was kept for diagnosis:
+    echo             %PS1FILE%
     echo           Text report, no window:
     echo             powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1FILE%" -ConsoleMode
     echo.
     pause
     exit /b %RC%
 )
+
+rem [audit P3-17] Clean up after a successful run. Only payload.b64/.dat used to
+rem   be deleted, so %TEMP% kept one folder plus one ps1 per run, forever.
+rem   The ps1 is removed after the script has exited, never while it runs.
+del "%PS1FILE%" >nul 2>&1
+rmdir "%WORKDIR%" >nul 2>&1
 echo.
 pause
 exit /b 0

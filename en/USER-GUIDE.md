@@ -10,7 +10,7 @@ After a reboot the boot menu shows one extra entry (the name you chose) — pick
 **Your existing system is not modified.** The new system is, physically, a single `.vhdx` file in a folder.
 To get rid of it, run the uninstaller: it disappears as cleanly as deleting a large file.
 
-> The main scripts need Windows 10 (10240 or later), 64-bit, and administrator rights.
+> The main scripts need Windows 10 (1607 or later), 64-bit, and administrator rights.
 > The UI is a Windows Forms GUI; the repair tools are console windows.
 
 ### Several systems, any name, any folder (since v1.11)
@@ -433,7 +433,7 @@ So `Invoke-Install` only ever deals with one `$realImage` and never tests format
 
 | Item | Requirement | If not met |
 |---|---|---|
-| Current system | Windows 10 10240 or later, 64-bit | will not run |
+| Current system | Windows 10 1607 or later, 64-bit | will not run |
 | Privileges | administrator | exits when elevation fails |
 | Storage partition | NTFS, local fixed disk, free ≥ size+5GB | the partition is not listed |
 | Storage partition, cont. | the system drive (C:) is allowed too — the only option on single-disk machines | it consumes system space; the UI warns in yellow |

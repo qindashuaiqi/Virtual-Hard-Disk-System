@@ -213,13 +213,17 @@ function Get-SafeDiskName {
     return $n
 }
 
-# 中文名能不能被 GBK 编码？不能的话 diskpart 会写出 ?，文件建不出来。
+# 这个名字能不能被系统 ANSI 代码页编码？不能的话 diskpart 会写出 ?，文件按问号名建出来，
+# 再 Test-Path 原名就找不到。
+#
+# [审计 P1-5] 这里以前写死 GBK(936)。英文系统（ACP=1252）上中文名能通过校验，diskpart 却把路径写成
+# "???.vhdx"，于是"名字明明是合法的却创建失败"，还留下垃圾文件。现在跟 Invoke-Diskpart 写脚本时
+# 用的是同一个编码。
 function Test-EncodableName {
     param([string]$Name)
     try {
-        $gbk = [System.Text.Encoding]::GetEncoding(936)
-        $bytes = $gbk.GetBytes($Name)
-        $back = $gbk.GetString($bytes)
+        $enc = Get-AnsiEncoding
+        $back = $enc.GetString($enc.GetBytes($Name))
         return ($back -eq $Name)
     } catch {
         return $false
@@ -276,6 +280,56 @@ function Get-FullPathFromBcdDevice {
     $m = [regex]::Match($Dev, '^vhd=\[([A-Za-z]):\]\\(.+)$')
     if (-not $m.Success) { return '' }
     return ("{0}:\{1}" -f $m.Groups[1].Value.ToUpper(), $m.Groups[2].Value)
+}
+
+# [审计 P0-1] 找到刚挂上的那块盘：按完整路径找，绝不只看文件名。
+#
+# 原来写的是 "Location -like *文件名*"，只要同名的盘就命中，紧接着就是 select disk N + clean。
+# 机器上并存 D:\A\WinVHD.vhdx 和 E:\Backup\WinVHD.vhdx（另一块盘上放个备份就够），
+# 就可能把不相干的那块盘的分区表清掉。
+#
+# 三级判定，一级比一级保守：
+#   1. Location 等于完整路径（忽略大小写，容忍 \\?\ 前缀）→ 采用
+#   2. 文件名相同，但全机只有一个 → 采用
+#   3. 文件名相同且有多个 → 直接报错，绝不挑一个
+# 什么都没找到时返回 $null。
+function Resolve-VhdDisk {
+    param([string]$VhdPath, $Disks)
+    if (-not $VhdPath) { return $null }
+    $full = [System.IO.Path]::GetFullPath($VhdPath)
+    $leaf = [System.IO.Path]::GetFileName($full)
+
+    $clean = {
+        param($p)
+        if (-not $p) { return '' }
+        $s = [string]$p
+        if ($s.StartsWith('\\?\')) { $s = $s.Substring(4) }
+        return $s.Trim()
+    }
+
+    $exact = @($Disks | Where-Object {
+        $loc = & $clean $_.Location
+        if (-not $loc) { return $false }
+        return [string]::Equals($loc, $full, [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($exact.Count -eq 1) { return $exact[0] }
+    if ($exact.Count -gt 1) {
+        throw ("有两块盘都声称来自同一个文件：{0}`n{1}`n`n没有动任何东西。" -f $full,
+               (($exact | ForEach-Object { '    磁盘 ' + $_.Number }) -join "`n"))
+    }
+
+    $byName = @($Disks | Where-Object {
+        $loc = & $clean $_.Location
+        if (-not $loc) { return $false }
+        return ([System.IO.Path]::GetFileName($loc) -eq $leaf)
+    })
+    if ($byName.Count -eq 1) { return $byName[0] }
+    if ($byName.Count -gt 1) {
+        throw (("机器上有多个挂载中的虚拟硬盘都叫 '{0}'：`n{1}`n`n没有动任何东西。" -f $leaf,
+               (($byName | ForEach-Object { '    磁盘 ' + $_.Number + ': ' + $_.Location }) -join "`n")) +
+              "把其它那个卸掉或改名后再试。")
+    }
+    return $null
 }
 
 # 扫出各固定 NTFS 盘里的所有 vhdx（含子目录，最多 3 层）。
@@ -370,7 +424,12 @@ function Test-TargetFolder {
         $r.Msg = '路径里不要用 . 或 ..'; return $r
     }
     if (-not (Test-EncodableName $p)) {
-        $r.Msg = '路径里有 GBK 编不了的字（emoji 等），请换一个'; return $r
+        $r.Msg = '路径里有系统代码页表示不了的字（emoji 等），请换一个'; return $r
+    }
+    # [审计 P1-6] 括号在 BCD 设备路径里是语法字符：vhd=[D:]\My (Games)\WinVHD.vhdx 会在 ")" 处被截断
+    # （见 Get-SafeDiskName 里 v1.27 的说明）。以前只清洗文件名，文件夹名就这么原样过去了。
+    if ($p -match '[\(\)\[\]\{\}]') {
+        $r.Msg = '文件夹名里有 ( ) [ ] 或 { }，启动项表达不了这些字符。请换一个不带括号的文件夹，例如 D:\VHD'; return $r
     }
     if (-not (Test-Path -LiteralPath $p)) {
         $r.Msg = "这个文件夹还不存在：$p"
@@ -457,8 +516,15 @@ function Get-DiskFreeBytes {
             return -1
         }
     }
-    $max = ($vals | Measure-Object -Maximum).Maximum
-    return [int64]$max
+    # [审计 P3] 取三个来源里的最小值，不是最大值。这个数字是给空间预检用的，
+    # 预检永远不能乐观：Get-Volume、DriveInfo、Get-PSDrive 三个说法不一致时（配额、过滤驱动、
+    # 缓存过期），按小的那个算才不会装到一半没空间。
+    $min = [int64](($vals | Measure-Object -Minimum).Minimum)
+    $max = [int64](($vals | Measure-Object -Maximum).Maximum)
+    if ($max -gt 0 -and $min -lt ($max * 0.9)) {
+        Write-Log ("可用空间的几个来源对不上：最小 {0} / 最大 {1} 字节，按小的算" -f $min, $max) 'WARN'
+    }
+    return $min
 }
 
 function Get-FreeGB {
@@ -1051,6 +1117,18 @@ function Test-WimFile {
 
     if (-not $r.Name) { $r.Error = '镜像缺少名称信息，可能不是系统镜像'; return $r }
 
+    # [审计 P3] 架构不对的镜像当场拒掉。x86 / ARM64 镜像能顺利装完，然后永远起不来，
+    # 用户要等 20 分钟装完 + 重启才发现。WIM 的 <ARCH>：0=x86 5=ARM 6=Itanium 9=x64 12=ARM64。
+    $mArch = [regex]::Match($xml, '<ARCH>(\d+)</ARCH>')
+    if ($mArch.Success) {
+        $arch = [int]$mArch.Groups[1].Value
+        if (@(0, 5, 6, 12) -contains $arch) {
+            $archName = switch ($arch) { 0 { 'x86（32 位）' } 5 { 'ARM' } 6 { 'Itanium' } 12 { 'ARM64' } }
+            $r.Error = "这个镜像是 $archName 的。启动项里的 vhd= 原生启动只支持 x64 系统，请换 x64 镜像。"
+            return $r
+        }
+    }
+
     # 多索引才去解析版本表（单索引没必要，反正只有它）
     if ($r.Images -gt 1) { $r.IndexList = @(Get-ImageIndexList -Path $Path) }
 
@@ -1640,7 +1718,9 @@ function Install-BootEntry {
     # 菜单里有这一项，一选就 0xc000000f 找不到文件。必须当场发现问题。
     $wantFull = [System.IO.Path]::GetFullPath($VhdFullPath)
     for ($attempt = 1; $attempt -le 2; $attempt++) {
-        $dm = [regex]::Match($chk.Raw, '(?im)^\s*(?:device|设备)\s+(vhd=\[[^\r\n]+)')
+        # [审计 P1-4] 不要依赖字段名：bcdedit 在德语系统上写 "Gerät"、日语写 "デバイス"、中文写 "设备"。
+        # 字段名对不上会被当成「路径写错了」，其实写对了。带 vhd= 的只有 device 那一行。
+        $dm = [regex]::Match($chk.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
         $backFull = ''
         if ($dm.Success) { $backFull = Get-FullPathFromBcdDevice $dm.Groups[1].Value.Trim() }
         if ($backFull -eq $wantFull) { break }
@@ -1660,7 +1740,10 @@ function Install-BootEntry {
     # v1.11：判据从「必须含『虚拟系统』」改成「读回来等于我写的 $desc」——
     # 用户自定义名称里通常不含「虚拟系统」四个字，用旧判据会把好名字误判成写入失败。
     $descBack = ''
-    if ($chk.Raw -match '(?:description|描述)\s+(.+?)\r?\n') { $descBack = $matches[1].Trim() }
+    # [审计 P1-4] 判定改成「输出里有没有我刚写进去的那串文字」，不再按字段名取：
+    # 字段名在德语系统是 "Beschreibung"、日语 "説明"、中文 "描述"。
+    $descBack = ''
+    if ($chk.Raw -match [regex]::Escape($desc)) { $descBack = $desc }
     if ($descBack -ne $desc) {
         Write-Log "描述读回不一致（期望「$desc」，实际「$descBack」），改用不含中文的写法" 'WARN'
         $asciiName = ($desc -replace '[^\x20-\x7E]', '').Trim()
@@ -1831,15 +1914,26 @@ function Invoke-Install {
             $allDisks = @(Get-Disk -EA SilentlyContinue)
             $vhdDisks = @($allDisks | Where-Object { ([string]$_.BusType) -eq 'File Backed Virtual' })
 
-            $hit = $vhdDisks | Where-Object { $_.Location -and $_.Location -like "*$($Script:VhdFileName)*" } | Select-Object -First 1
-            if ($hit) { $diskNum = $hit.Number; Write-Log "按 BusType+Location 命中 Disk$diskNum" }
-
-            if ($diskNum -lt 0) {
-                $hit = $allDisks | Where-Object { $_.Location -and $_.Location -like "*$($Script:VhdFileName)*" } | Select-Object -First 1
-                if ($hit) { $diskNum = $hit.Number; Write-Log "按 Location 命中 Disk$diskNum" }
+            $hit = Resolve-VhdDisk -VhdPath $vhdPath -Disks $vhdDisks
+            if (-not $hit) { $hit = Resolve-VhdDisk -VhdPath $vhdPath -Disks $allDisks }
+            if ($hit) {
+                $diskNum = $hit.Number
+                Write-Log "按完整路径命中 Disk$diskNum（$($hit.Location)）"
             }
             if ($diskNum -lt 0 -and $vhdDisks.Count -eq 1) {
-                $diskNum = $vhdDisks[0].Number
+                # 最后一招：全机只有一块文件型虚拟盘。只有当它不是别的 vhdx 文件时才敢用——
+                # 否则那是别的工具（Hyper-V、备份）的盘，绝不能 clean。
+                $only = $vhdDisks[0]
+                $onlyLoc = [string]$only.Location
+                if ($onlyLoc) {
+                    if ($onlyLoc.StartsWith('\\?\')) { $onlyLoc = $onlyLoc.Substring(4) }
+                    $wantFull = [System.IO.Path]::GetFullPath($vhdPath)
+                    if ([System.IO.Path]::GetFileName($onlyLoc) -ne [System.IO.Path]::GetFileName($wantFull)) {
+                        throw ("唯一挂着的虚拟盘（Disk{0}）来自`n    {1}`n并不是这次创建的文件：`n    {2}`n`n没有动任何东西。" -f
+                               $only.Number, $onlyLoc, $wantFull)
+                    }
+                }
+                $diskNum = $only.Number
                 Write-Log "系统里只有一块虚拟磁盘，判定为 Disk$diskNum"
             }
 
@@ -1886,6 +1980,29 @@ function Invoke-Install {
         #
         # Initialize-Disk 只写 GPT 头、不会建 MSR；New-Partition 只建一个数据分区。
         # clean 仍交给 diskpart（这条路径已验证可用）。
+        # [审计 P0-1] clean 之前的最后一道闸。整个程序里破坏性最强的一条命令就是它。
+        # 如果这块盘能报出自己来自哪个文件，那必须是我们的文件；对不上说明前面匹配错了，
+        # 再 clean 就是清别人的分区表。
+        if (-not $createdHere) {
+            throw "拒绝清空 Disk$diskNum：这个文件不是本次运行创建的。"
+        }
+        $guardDisk = $null
+        try { $guardDisk = Get-Disk -Number $diskNum -EA Stop } catch {}
+        if ($guardDisk) {
+            $gl = [string]$guardDisk.Location
+            if ($gl) {
+                if ($gl.StartsWith('\\?\')) { $gl = $gl.Substring(4) }
+                $wantFull = [System.IO.Path]::GetFullPath($vhdPath)
+                if (-not [string]::Equals($gl.Trim(), $wantFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw ("拒绝清空 Disk{0}。`n`n这块盘报出的文件是：`n    {1}`n而本次创建的是：`n    {2}`n`n没有删除任何东西。多半是还挂着另一个同名的虚拟硬盘，卸掉它再试。" -f $diskNum, $gl, $wantFull)
+                }
+            }
+            $bt = [string]$guardDisk.BusType
+            if ($bt -and ($bt -notin @('File Backed Virtual', 'Virtual', 'Unknown'))) {
+                throw ("拒绝清空 Disk{0}：它的总线类型是 '{1}'，不是虚拟磁盘。" -f $diskNum, $bt)
+            }
+        }
+
         $dp = Invoke-Diskpart -Tag 'vhd' -Lines @(
             "select disk $diskNum",
             'clean',
@@ -2525,6 +2642,20 @@ function Show-Gui {
     $form.MaximizeBox = $false
     $form.BackColor = [System.Drawing.Color]::FromArgb(247, 248, 250)
     $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+
+    # [审计 P1-7] 安装是在 UI 线程上跑的，10~40 分钟，期间一直在刷新控件。
+    # 中途点右上角关窗口会把那些控件释放掉，finally 里的清理也可能走不到。
+    # 干活期间禁止关闭（状态栏会说明原因）。
+    $form.Add_FormClosing({
+        param($sender, $e)
+        if ($script:Busy) {
+            $e.Cancel = $true
+            try {
+                $lblSt.Text = '正在安装，装完之前不能关闭窗口'
+                $lblSt.ForeColor = [System.Drawing.Color]::FromArgb(190, 80, 60)
+            } catch {}
+        }
+    })
 
     # ---- 顶栏 ----
     $hd = New-Object System.Windows.Forms.Panel
