@@ -2,25 +2,54 @@
 """
 把 PowerShell 脚本打包成单文件双击 bat（base64 自解压）。
 
-用法： python make_bat.py
+用法： python make_bat_zh.py
+源  ： <repo>/src/zh-CN/*.ps1
+输出： <repo>/zh-CN/*.bat 和 <repo>/zh-CN/急救工具/*.bat
+
+2026-11-05 修复：原来的外壳用
+    powershell -Command "Start-Process ... -ArgumentList '...','\"%PS1FILE%\"' ..."
+提权，这层嵌套引号在某些环境下会被 -Command 提前截断，powershell 解析失败直接退出，
+而下面紧跟 exit /b 0，窗口一闪就没了 —— 既没有提示也不写日志。
+改成：先给 bat 自己提权，再用普通 -File 原地运行脚本，所有错误都留在窗口里。
 """
 import base64
 import os
-import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)          # _源码\
-BASE = os.path.dirname(ROOT)          # 一键装系统\
-RESCUE = os.path.join(BASE, '急救工具')
-
-# 只有这两个留在根目录当门面，其余全部收进 急救工具\
-MAIN_BATS = ('双击我-装系统.bat', '双击我-卸载新系统.bat')
+HERE = os.path.dirname(os.path.abspath(__file__))     # src\build
+SRC = os.path.dirname(HERE)                            # src
+REPO = os.path.dirname(SRC)                            # 仓库根
+ZH_SRC = os.path.join(SRC, 'zh-CN')
+OUT_MAIN = os.path.join(REPO, 'zh-CN')
+OUT_TOOLS = os.path.join(OUT_MAIN, '急救工具')
 
 BAT_TEMPLATE = r'''@echo off
 setlocal enabledelayedexpansion
 chcp 936 >nul 2>&1
 title %TITLE%
+cd /d "%~dp0"
 
+rem ---------------------------------------------------------------- 管理员权限
+rem 提权只在这里做一次，作用在 bat 自身。
+rem 绝对不要再用 powershell -Command "... Start-Process -ArgumentList '\"...\"' ..."
+rem 这种嵌套引号：它只在部分环境成立，一旦被 -Command 提前截断，powershell 解析失败
+rem 直接退出，而下面紧跟 exit /b，窗口一闪就没 —— 没有提示，也不写日志，看起来就像闪退。
+rem （2026-11-05 实测：整个英文版都因为这个原因打不开。）
+rem 改成先提权、再用普通 -File 运行脚本，任何错误都留在窗口里。
+fltmc >nul 2>&1
+if errorlevel 1 (
+    echo   正在申请管理员权限，请在弹窗中选「是」...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    if errorlevel 9 (
+        echo.
+        echo   [错误] 没能获得管理员权限。
+        echo          请右键本文件，选择「以管理员身份运行」。
+        echo.
+        pause
+    )
+    exit /b
+)
+
+rem ---------------------------------------------------------------- 解包
 rem 每次用一个全新的随机工作目录。
 rem 不能复用固定目录：上一次残留的 ps1 会导致 certutil 拒绝覆盖，
 rem 而 "if not exist" 检查又能通过（旧文件在），于是静默跑旧代码 —— 表现为
@@ -59,25 +88,39 @@ if not "%GOT%"=="%NEED%" (
     pause
     exit /b 1
 )
+del "%B64FILE%" "%RAW%" >nul 2>&1
 
 echo.
 echo   正在启动，请稍候...
 echo.
-rem %~dp0 结尾带反斜杠，作为参数会转义引号，先去掉
-set "ORIGIN=%~dp0"
-if "%ORIGIN:~-1%"=="\" set "ORIGIN=%ORIGIN:~0,-1%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-STA','-File','\"%PS1FILE%\"'%EXTRAARGS% -Verb RunAs -Wait"
+
+rem %~dp0 结尾带反斜杠，补一个 . 就没有了，避免写 if "%X:~-1%"=="\" 这种易错的判断。
+rem 下面一行里不要出现任何嵌套引号。
+set "ORIGIN=%~dp0."
+
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%"%PSARGS%
+set "RC=%ERRORLEVEL%"
+
+if not "%RC%"=="0" (
+    echo.
+    echo   [错误] 脚本退出码 %RC%。
+    echo          想看纯文本报告（不开窗口）：
+    echo             powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1FILE%" -ConsoleMode
+    echo.
+    pause
+    exit /b %RC%
+)
+%TAIL%
 exit /b 0
 '''
 
 
 def build(ps1_name, bat_name, title, with_origin=True, keep_window=False):
-    ps1_path = os.path.join(ROOT, ps1_name)
+    ps1_path = os.path.join(ZH_SRC, ps1_name)
     with open(ps1_path, 'rb') as f:
         raw = f.read()
 
-    # 校验：必须是 UTF-8 BOM
-    if not (raw[:3] == b'\xef\xbb\xbf'):
+    if raw[:3] != b'\xef\xbb\xbf':
         print('[WARN] %s 缺少 UTF-8 BOM' % ps1_name)
 
     b64 = base64.b64encode(raw).decode('ascii')
@@ -85,34 +128,28 @@ def build(ps1_name, bat_name, title, with_origin=True, keep_window=False):
     chunks = [b64[i:i + 76] for i in range(0, len(b64), 76)]
     lines = '\r\n'.join('>> "%%B64FILE%%" echo %s' % c for c in chunks)
 
-    extra = ",'-OriginDir','\\\"%ORIGIN%\\\"'" if with_origin else ''
+    ps_args = ' -OriginDir "%ORIGIN%"' if with_origin else ''
+    # 控制台工具跑完要留住窗口，让人看得到报告；GUI 脚本关窗口就结束。
+    tail = 'echo.\r\npause' if keep_window else ''
 
     bat = BAT_TEMPLATE
     bat = bat.replace('%B64LINES%', lines)
-    bat = bat.replace('%EXTRAARGS%', extra)
+    bat = bat.replace('%PSARGS%', ps_args)
+    bat = bat.replace('%TAIL%', tail)
     bat = bat.replace('%PS1NAME%', ps1_name)
     bat = bat.replace('%PS1SIZE%', str(len(raw)))
     bat = bat.replace('%TITLE%', title)
 
-    # 控制台脚本需要 -NoExit 保持窗口（否则跑完一闪而过看不到输出）；
-    # GUI 脚本用 -Wait 等窗口关闭即可。
-    if keep_window:
-        bat = bat.replace("-Verb RunAs -Wait", "-Verb RunAs")
-        bat = bat.replace("'-STA','-File','\\\"%PS1FILE%\\\"'",
-                          "'-NoExit','-File','\\\"%PS1FILE%\\\"'")
-
-    # bat 用 GBK，且必须 CRLF
     bat = bat.replace('\r\n', '\n').replace('\n', '\r\n')
-    out_dir = BASE if bat_name in MAIN_BATS else RESCUE
-    if not os.path.isdir(out_dir):
-        os.makedirs(out_dir)
-    out = os.path.join(out_dir, bat_name)
+    target = OUT_MAIN if bat_name in ('双击我-装系统.bat', '双击我-卸载新系统.bat') else OUT_TOOLS
+    if not os.path.isdir(target):
+        os.makedirs(target)
+    out = os.path.join(target, bat_name)
     with open(out, 'wb') as f:
         f.write(bat.encode('gbk'))
 
-    print('OK  %s  <- %s  (ps1=%d bytes, b64 lines=%d, bat=%d bytes)'
-          % (os.path.join(os.path.basename(out_dir), bat_name) if out_dir != BASE else bat_name,
-             ps1_name, len(raw), len(chunks), os.path.getsize(out)))
+    print('OK  %-28s <- %-38s (ps1=%d bytes, b64 lines=%d, bat=%d bytes)'
+          % (bat_name, ps1_name, len(raw), len(chunks), os.path.getsize(out)))
     return out
 
 

@@ -2,7 +2,30 @@
 setlocal enabledelayedexpansion
 chcp 936 >nul 2>&1
 title 修复启动菜单
+cd /d "%~dp0"
 
+rem ---------------------------------------------------------------- 管理员权限
+rem 提权只在这里做一次，作用在 bat 自身。
+rem 绝对不要再用 powershell -Command "... Start-Process -ArgumentList '\"...\"' ..."
+rem 这种嵌套引号：它只在部分环境成立，一旦被 -Command 提前截断，powershell 解析失败
+rem 直接退出，而下面紧跟 exit /b，窗口一闪就没 —— 没有提示，也不写日志，看起来就像闪退。
+rem （2026-11-05 实测：整个英文版都因为这个原因打不开。）
+rem 改成先提权、再用普通 -File 运行脚本，任何错误都留在窗口里。
+fltmc >nul 2>&1
+if errorlevel 1 (
+    echo   正在申请管理员权限，请在弹窗中选「是」...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    if errorlevel 9 (
+        echo.
+        echo   [错误] 没能获得管理员权限。
+        echo          请右键本文件，选择「以管理员身份运行」。
+        echo.
+        pause
+    )
+    exit /b
+)
+
+rem ---------------------------------------------------------------- 解包
 rem 每次用一个全新的随机工作目录。
 rem 不能复用固定目录：上一次残留的 ps1 会导致 certutil 拒绝覆盖，
 rem 而 "if not exist" 检查又能通过（旧文件在），于是静默跑旧代码 —— 表现为
@@ -1181,12 +1204,27 @@ if not "%GOT%"=="%NEED%" (
     pause
     exit /b 1
 )
+del "%B64FILE%" "%RAW%" >nul 2>&1
 
 echo.
 echo   正在启动，请稍候...
 echo.
-rem %~dp0 结尾带反斜杠，作为参数会转义引号，先去掉
-set "ORIGIN=%~dp0"
-if "%ORIGIN:~-1%"=="\" set "ORIGIN=%ORIGIN:~0,-1%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-STA','-File','\"%PS1FILE%\"','-OriginDir','\"%ORIGIN%\"' -Verb RunAs -Wait"
+
+rem %~dp0 结尾带反斜杠，补一个 . 就没有了，避免写 if "%X:~-1%"=="\" 这种易错的判断。
+rem 下面一行里不要出现任何嵌套引号。
+set "ORIGIN=%~dp0."
+
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%" -OriginDir "%ORIGIN%"
+set "RC=%ERRORLEVEL%"
+
+if not "%RC%"=="0" (
+    echo.
+    echo   [错误] 脚本退出码 %RC%。
+    echo          想看纯文本报告（不开窗口）：
+    echo             powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1FILE%" -ConsoleMode
+    echo.
+    pause
+    exit /b %RC%
+)
+
 exit /b 0

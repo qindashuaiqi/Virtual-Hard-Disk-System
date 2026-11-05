@@ -24,7 +24,32 @@ BAT_TEMPLATE = r'''@echo off
 setlocal enabledelayedexpansion
 chcp 437 >nul 2>&1
 title %TITLE%
+cd /d "%~dp0"
 
+rem ---------------------------------------------------------------- admin rights
+rem Ask for elevation once, here, on the bat itself - never inside a nested
+rem   powershell -Command "... Start-Process -ArgumentList '\"...\"' ..."
+rem string. That form only survives some consoles: when the escaping breaks,
+rem powershell dies while parsing, this file reaches "exit /b 0", the window
+rem closes and the user sees nothing but a flash - no message, and no log file
+rem either (measured 2026-11-05, the whole English release was dead this way).
+rem Doing it here and then running the script with a plain -File keeps every
+rem error on screen.
+fltmc >nul 2>&1
+if errorlevel 1 (
+    echo   Requesting administrator rights - confirm the UAC prompt...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    if errorlevel 9 (
+        echo.
+        echo   [ERROR] Could not get administrator rights.
+        echo           Right-click this file and choose "Run as administrator".
+        echo.
+        pause
+    )
+    exit /b
+)
+
+rem ---------------------------------------------------------------- unpack
 rem Use a brand new random work folder every run.
 rem A fixed folder must not be reused: a leftover ps1 from the previous run makes
 rem certutil refuse to overwrite, while the "if not exist" check still passes
@@ -64,14 +89,30 @@ if not "%GOT%"=="%NEED%" (
     pause
     exit /b 1
 )
+del "%B64FILE%" "%RAW%" >nul 2>&1
 
 echo.
 echo   Starting, please wait...
 echo.
-rem %~dp0 ends with a backslash, which would escape the quote when passed as an argument, so strip it
-set "ORIGIN=%~dp0"
-if "%ORIGIN:~-1%"=="\" set "ORIGIN=%ORIGIN:~0,-1%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-STA','-File','\"%PS1FILE%\"'%EXTRAARGS% -Verb RunAs -Wait"
+
+rem %~dp0 ends with a backslash. Appending "." gives a path without one, which
+rem avoids the fragile  if "%X:~-1%"=="\"  comparison in a batch file.
+rem No nested quoting anywhere below on purpose.
+set "ORIGIN=%~dp0."
+
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1FILE%"%PSARGS%
+set "RC=%ERRORLEVEL%"
+
+if not "%RC%"=="0" (
+    echo.
+    echo   [ERROR] The script exited with code %RC%.
+    echo           Text report, no window:
+    echo             powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1FILE%" -ConsoleMode
+    echo.
+    pause
+    exit /b %RC%
+)
+%TAIL%
 exit /b 0
 '''
 
@@ -88,21 +129,18 @@ def build(ps1_name, bat_name, title, with_origin=True, keep_window=False, out_di
     chunks = [b64[i:i + 76] for i in range(0, len(b64), 76)]
     lines = '\r\n'.join('>> "%%B64FILE%%" echo %s' % c for c in chunks)
 
-    extra = ",'-OriginDir','\\\"%ORIGIN%\\\"'" if with_origin else ''
+    ps_args = ' -OriginDir "%ORIGIN%"' if with_origin else ''
+    # Console tools finish on their own; the script prints a report, so keep the
+    # window up long enough to read it. GUI scripts close when the window is closed.
+    tail = 'echo.\r\npause' if keep_window else ''
 
     bat = BAT_TEMPLATE
     bat = bat.replace('%B64LINES%', lines)
-    bat = bat.replace('%EXTRAARGS%', extra)
+    bat = bat.replace('%PSARGS%', ps_args)
+    bat = bat.replace('%TAIL%', tail)
     bat = bat.replace('%PS1NAME%', ps1_name)
     bat = bat.replace('%PS1SIZE%', str(len(raw)))
     bat = bat.replace('%TITLE%', title)
-
-    # Console scripts need -NoExit to keep the window open (otherwise it flashes and closes);
-    # GUI scripts use -Wait and wait for the window to close.
-    if keep_window:
-        bat = bat.replace("-Verb RunAs -Wait", "-Verb RunAs")
-        bat = bat.replace("'-STA','-File','\\\"%PS1FILE%\\\"'",
-                          "'-NoExit','-File','\\\"%PS1FILE%\\\"'")
 
     bat = bat.replace('\r\n', '\n').replace('\n', '\r\n')
     target = out_dir or OUT_TOOLS
