@@ -166,6 +166,21 @@ function Get-AnsiEncoding {
     }
 }
 
+# bcdedit 的输出走控制台代码页，打不出来的字会变成 "?"。英文启动器开头是 chcp 437，
+# 中文路径于是整个变成 "?"，写对了也被判成写错。
+function Test-BcdTextSame {
+    param([string]$Want, [string]$Got)
+    if ($null -eq $Got) { return $false }
+    if ($Got -eq $Want) { return $true }
+    if ($Got.Length -ne $Want.Length) { return $false }
+    for ($i = 0; $i -lt $Want.Length; $i++) {
+        if ($Got[$i] -eq $Want[$i]) { continue }
+        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
+        return $false
+    }
+    return $true
+}
+
 # 调 diskpart。$Lines 是命令数组，返回 @{ Ok; Text; Path; Error }
 function Invoke-Diskpart {
     param([string[]]$Lines, [string]$Tag = 'dp')
@@ -528,10 +543,10 @@ function Test-BcdEntryForVhd {
     $r = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $Guid) -Tag 'probe'
     if (-not $r.Ok) { return $out }      # 条目不存在 → 「菜单里没有它」
     $out.Exists = $true
-    $m = [regex]::Match($r.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+    $m = [regex]::Match($r.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
     if ($m.Success) { $out.Dev = $m.Groups[1].Value.Trim() }
     $back = ConvertFrom-BcdDevice $out.Dev
-    $out.DevOk = [bool]($back -and ($back -ieq $VhdPath))
+    $out.DevOk = [bool]($back -and (Test-BcdTextSame $VhdPath $back))
     return $out
 }
 
@@ -1134,7 +1149,7 @@ try {
     # ---------- 校验 1：设备路径逐字核对 ----------
     $check = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $guid) -Tag 'verify'
     $devNow = ''
-    $mv = [regex]::Match($check.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+    $mv = [regex]::Match($check.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
     if ($mv.Success) { $devNow = $mv.Groups[1].Value.Trim() }
     if ($devNow -notmatch '(?i)vhd=') {
         throw ("启动条目里没写进 vhd= 设备路径。`n`n" +
@@ -1152,7 +1167,7 @@ try {
         [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'osdevice', $vhdDev) -Tag 'fix-dev')
         $check = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $guid) -Tag 'verify2'
         $devNow = ''
-        $mv = [regex]::Match($check.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+        $mv = [regex]::Match($check.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
         if ($mv.Success) { $devNow = $mv.Groups[1].Value.Trim() }
         $backPath = ConvertFrom-BcdDevice $devNow
         if (-not $backPath -or ($backPath -ine $VhdPath)) {
@@ -1173,13 +1188,18 @@ try {
     $md = [regex]::Match($check.Raw, '(?im)^\s*(?:description|描述)\s+(.+)$')
     if ($md.Success) { $descNow = $md.Groups[1].Value.Trim() }
     if ($descNow -ne $desc) {
-        # 中文写不进去时（命令行编码问题）退到纯英文，别让菜单显示成问号
-        $safeDesc = 'Windows (VHD) ' + [System.IO.Path]::GetFileNameWithoutExtension($VhdPath)
-        $safeDesc = ($safeDesc -replace '[^\x20-\x7E]', '').Trim()
-        if (-not $safeDesc) { $safeDesc = 'Windows (VHD)' }
-        Write-Log ("菜单文字没能正确写入（读回「{0}」），改用「{1}」" -f $descNow, $safeDesc) 'WARN'
-        [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'description', $safeDesc) -Tag 'desc-en')
-        $desc = $safeDesc
+        # 回读里是 "?" 只是控制台打不出中文，不要因为显示问题把名字换成英文
+        if (($descNow -replace '[^\x20-\x7E]', '?') -eq ($desc -replace '[^\x20-\x7E]', '?')) {
+            Write-Log "菜单文字被控制台代码页遮住了，保留「$desc」" 'WARN'
+        } else {
+            # 中文写不进去时（命令行编码问题）退到纯英文，别让菜单显示成问号
+            $safeDesc = 'Windows (VHD) ' + [System.IO.Path]::GetFileNameWithoutExtension($VhdPath)
+            $safeDesc = ($safeDesc -replace '[^\x20-\x7E]', '').Trim()
+            if (-not $safeDesc) { $safeDesc = 'Windows (VHD)' }
+            Write-Log ("菜单文字没能正确写入（读回「{0}」），改用「{1}」" -f $descNow, $safeDesc) 'WARN'
+            [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'description', $safeDesc) -Tag 'desc-en')
+            $desc = $safeDesc
+        }
     }
 
     # ---------- 新条目确认可用之后，才删旧条目 ----------

@@ -353,7 +353,11 @@ function Show-Gui {
                 foreach ($blk in $blocks) {
                     if ($blk -notmatch '(?:identifier|标识符)\s+(\{[0-9a-fA-F\-]+\})') { continue }
                     $g = $Matches[1]
-                    if ($blk -match [regex]::Escape($exactDev)) {
+                    # [chcp 437] 回读里路径的中文可能变成 "?"，两边都遮一下再比，
+                    # 否则条目匹配不上，卸载完菜单里会留一个孤儿项。
+                    $looseBlk = ($blk -replace '[^\x20-\x7E]', '?')
+                    $looseDev = ($exactDev -replace '[^\x20-\x7E]', '?')
+                    if ($looseBlk -match [regex]::Escape($looseDev)) {
                         [void]$hit.Add([PSCustomObject]@{ Guid = $g; Block = $blk })
                     }
                 }

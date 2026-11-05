@@ -166,6 +166,23 @@ function Get-AnsiEncoding {
     }
 }
 
+
+# bcdedit prints through the console code page, so a character the page cannot carry comes
+# back as "?". The English launcher runs "chcp 437", which turned every Chinese character in
+# a path into "?" and made a correct BCD write look like a wrong path.
+function Test-BcdTextSame {
+    param([string]$Want, [string]$Got)
+    if ($null -eq $Got) { return $false }
+    if ($Got -eq $Want) { return $true }
+    if ($Got.Length -ne $Want.Length) { return $false }
+    for ($i = 0; $i -lt $Want.Length; $i++) {
+        if ($Got[$i] -eq $Want[$i]) { continue }
+        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
+        return $false
+    }
+    return $true
+}
+
 # Call diskpart. $Lines is the command array; returns @{ Ok; Text; Path; Error }
 function Invoke-Diskpart {
     param([string[]]$Lines, [string]$Tag = 'dp')
@@ -529,10 +546,10 @@ function Test-BcdEntryForVhd {
     $r = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $Guid) -Tag 'probe'
     if (-not $r.Ok) { return $out }      # entry does not exist -> "the menu has no such entry"
     $out.Exists = $true
-    $m = [regex]::Match($r.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+    $m = [regex]::Match($r.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
     if ($m.Success) { $out.Dev = $m.Groups[1].Value.Trim() }
     $back = ConvertFrom-BcdDevice $out.Dev
-    $out.DevOk = [bool]($back -and ($back -ieq $VhdPath))
+    $out.DevOk = [bool]($back -and (Test-BcdTextSame $VhdPath $back))
     return $out
 }
 
@@ -1135,7 +1152,7 @@ try {
     # ---------- Check 1: compare the device path character by character ----------
     $check = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $guid) -Tag 'verify'
     $devNow = ''
-    $mv = [regex]::Match($check.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+    $mv = [regex]::Match($check.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
     if ($mv.Success) { $devNow = $mv.Groups[1].Value.Trim() }
     if ($devNow -notmatch '(?i)vhd=') {
         throw ("The vhd= device path was not written into the boot entry.`n`n" +
@@ -1147,16 +1164,16 @@ try {
     # Reverse-parse it into a real path and compare it character by character with the file on disk.
     $backPath = ConvertFrom-BcdDevice $devNow
     Write-Log ("Entry check: device={0}  reverse-parsed={1}" -f $devNow, $backPath)
-    if ($backPath -and ($backPath -ine $VhdPath)) {
+    if ($backPath -and -not (Test-BcdTextSame $VhdPath $backPath)) {
         Write-Log "Wrong target (should be $VhdPath), rewriting once" 'WARN'
         [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'device', $vhdDev) -Tag 'fix-dev')
         [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'osdevice', $vhdDev) -Tag 'fix-dev')
         $check = Invoke-BcdEdit -Store '' -BcdArgs @('/enum', $guid) -Tag 'verify2'
         $devNow = ''
-        $mv = [regex]::Match($check.Raw, '(?im)^\s*(?:device|设备)\s+(.+)$')
+        $mv = [regex]::Match($check.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
         if ($mv.Success) { $devNow = $mv.Groups[1].Value.Trim() }
         $backPath = ConvertFrom-BcdDevice $devNow
-        if (-not $backPath -or ($backPath -ine $VhdPath)) {
+        if (-not $backPath -or -not (Test-BcdTextSame $VhdPath $backPath)) {
             throw ("The device path cannot be written, or was overwritten after writing.`n`n" +
                    "Expected: $vhdDev`n" +
                    "Read back: $devNow`n`n" +
@@ -1174,13 +1191,18 @@ try {
     $md = [regex]::Match($check.Raw, '(?im)^\s*(?:description|描述)\s+(.+)$')
     if ($md.Success) { $descNow = $md.Groups[1].Value.Trim() }
     if ($descNow -ne $desc) {
-        # When non-ASCII text cannot be written (command line encoding), fall back to plain ASCII so the menu does not show question marks
-        $safeDesc = 'Windows (VHD) ' + [System.IO.Path]::GetFileNameWithoutExtension($VhdPath)
-        $safeDesc = ($safeDesc -replace '[^\x20-\x7E]', '').Trim()
-        if (-not $safeDesc) { $safeDesc = 'Windows (VHD)' }
-        Write-Log ("Menu text could not be written correctly (read back ""{0}""), using ""{1}"" instead" -f $descNow, $safeDesc) 'WARN'
-        [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'description', $safeDesc) -Tag 'desc-en')
-        $desc = $safeDesc
+        # A "?" in the readback is only the console code page; do not rename a good entry
+        if (($descNow -replace '[^\x20-\x7E]', '?') -eq ($desc -replace '[^\x20-\x7E]', '?')) {
+            Write-Log ('Menu text masked by the console code page, keeping "' + $desc + '"') 'WARN'
+        } else {
+            # When non-ASCII text cannot be written (command line encoding), fall back to plain ASCII so the menu does not show question marks
+            $safeDesc = 'Windows (VHD) ' + [System.IO.Path]::GetFileNameWithoutExtension($VhdPath)
+            $safeDesc = ($safeDesc -replace '[^\x20-\x7E]', '').Trim()
+            if (-not $safeDesc) { $safeDesc = 'Windows (VHD)' }
+            Write-Log ("Menu text could not be written correctly (read back ""{0}""), using ""{1}"" instead" -f $descNow, $safeDesc) 'WARN'
+            [void](Invoke-BcdEdit -Store '' -BcdArgs @('/set', $guid, 'description', $safeDesc) -Tag 'desc-en')
+            $desc = $safeDesc
+        }
     }
 
     # ---------- Delete the old entry only after the new one is verified ----------

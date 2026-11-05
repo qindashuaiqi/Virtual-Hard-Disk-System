@@ -46,6 +46,22 @@ function Invoke-Bcd {
     return @{ Ok = (($code -eq 0) -and (-not $bad)); Code = $code; Text = $clean; Raw = $txt }
 }
 
+# bcdedit prints through the console code page, so a character the page cannot carry comes
+# back as "?". The English launcher runs "chcp 437", which turned every Chinese character in
+# a path into "?" and made a correct BCD write look like a wrong path.
+function Test-BcdTextSame {
+    param([string]$Want, [string]$Got)
+    if ($null -eq $Got) { return $false }
+    if ($Got -eq $Want) { return $true }
+    if ($Got.Length -ne $Want.Length) { return $false }
+    for ($i = 0; $i -lt $Want.Length; $i++) {
+        if ($Got[$i] -eq $Want[$i]) { continue }
+        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
+        return $false
+    }
+    return $true
+}
+
 # Full path -> BCD vhd= syntax. The intermediate subfolder must be preserved:
 #   D:\VirtualDisks\maimai.vhdx  ->  vhd=[D:]\VirtualDisks\maimai.vhdx
 function Get-VhdBcdDevice {
@@ -219,12 +235,13 @@ foreach ($it in $items) {
     }
 
     # Check the path device points at
-    $dm = [regex]::Match($en.Raw, '(?im)^\s*(?:device|设备)\s+(\S.*?)\s*$')
+    # Do not depend on the field label ("device" / "Gerät" / "デバイス"): the only line carrying "vhd=[" is the device line
+    $dm = [regex]::Match($en.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
     $curDev = ''
     if ($dm.Success) { $curDev = $dm.Groups[1].Value.Trim() }
     $curFull = Get-FullPathFromBcdDevice $curDev
 
-    if ($curFull -eq $wantFull) {
+    if (Test-BcdTextSame $wantFull $curFull) {
         Write-Log "Target correct: $curDev" 'OK'
         $okCount++
     } else {
@@ -232,16 +249,17 @@ foreach ($it in $items) {
         [void](Invoke-Bcd -BcdArgs @('/set', $guid, 'device',   $wantDev) -Tag 'fix-device')
         [void](Invoke-Bcd -BcdArgs @('/set', $guid, 'osdevice', $wantDev) -Tag 'fix-osdevice')
         $chk = Invoke-Bcd -BcdArgs @('/enum', $guid) -Tag 'recheck'
-        $dm2 = [regex]::Match($chk.Raw, '(?im)^\s*(?:device|设备)\s+(\S.*?)\s*$')
+        $dm2 = [regex]::Match($chk.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
         $nowDev = ''
         if ($dm2.Success) { $nowDev = $dm2.Groups[1].Value.Trim() }
         $nowFull = Get-FullPathFromBcdDevice $nowDev
-        if ($nowFull -eq $wantFull) {
+        if (Test-BcdTextSame $wantFull $nowFull) {
             Write-Log "Corrected: $nowDev" 'OK'
             $fixedCount++
         } else {
             Write-Log ("Still wrong after the change, now [{0}]" -f $nowDev) 'ERR'
-            Write-Log 'bcdedit most likely cannot handle a non-ASCII path. Moving the virtual disk to a plain ASCII folder (such as D:\VHD) and reinstalling is the reliable fix.' 'ERR'
+            Write-Log 'If that shows "?" where the path has non-ASCII characters, it is only the console code page: run  chcp 936  and  bcdedit /enum  to see the real text.' 'ERR'
+            Write-Log 'If it really points elsewhere, moving the virtual disk to a plain ASCII folder (such as D:\VHD) and reinstalling is the reliable fix.' 'ERR'
             $failCount++
             continue
         }

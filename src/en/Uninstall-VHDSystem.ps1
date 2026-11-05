@@ -358,7 +358,11 @@ function Show-Gui {
                 foreach ($blk in $blocks) {
                     if ($blk -notmatch '(?:identifier|标识符)\s+(\{[0-9a-fA-F\-]+\})') { continue }
                     $g = $Matches[1]
-                    if ($blk -match [regex]::Escape($exactDev)) {
+                    # [chcp 437] The readback may show "?" where the path has non-ASCII characters,
+                    # so mask both sides before the exact match; otherwise the entry is left behind.
+                    $looseBlk = ($blk -replace '[^\x20-\x7E]', '?')
+                    $looseDev = ($exactDev -replace '[^\x20-\x7E]', '?')
+                    if ($looseBlk -match [regex]::Escape($looseDev)) {
                         [void]$hit.Add([PSCustomObject]@{ Guid = $g; Block = $blk })
                     }
                 }

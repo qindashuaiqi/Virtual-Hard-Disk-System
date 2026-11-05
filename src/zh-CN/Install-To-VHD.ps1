@@ -282,6 +282,46 @@ function Get-FullPathFromBcdDevice {
     return ("{0}:\{1}" -f $m.Groups[1].Value.ToUpper(), $m.Groups[2].Value)
 }
 
+# bcdedit 的输出走控制台代码页，打不出来的字会变成 "?"。英文启动器开头是 chcp 437，
+# 中文路径于是整个变成 "?"，写对了也被判成写错。BCD 里存的是原文，比较时要容忍这一点。
+function Test-BcdTextSame {
+    param([string]$Want, [string]$Got)
+    if ($null -eq $Got) { return $false }
+    if ($Got -eq $Want) { return $true }
+    if ($Got.Length -ne $Want.Length) { return $false }
+    for ($i = 0; $i -lt $Want.Length; $i++) {
+        if ($Got[$i] -eq $Want[$i]) { continue }
+        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
+        return $false
+    }
+    return $true
+}
+
+# 完全绕开控制台的第二种判据：把 BCD 导出成文件，在 hive 里按 UTF-16 找这段路径
+# （BCD 就是注册表 hive，字符串元素是 UTF-16 存的）。导不出来时返回 $null。
+function Test-BcdStoresPath {
+    param([string]$Path)
+    if (-not $Path) { return $null }
+    $tmp = Join-Path $env:TEMP ("bcd-verify-{0}.bcd" -f ([guid]::NewGuid().ToString('N')))
+    try {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        [void](& bcdedit /export $tmp 2>&1 | Out-String)
+        if (-not (Test-Path -LiteralPath $tmp)) { return $null }
+        $bytes = [System.IO.File]::ReadAllBytes($tmp)
+        foreach ($off in 0, 1) {
+            $len = $bytes.Length - $off - (($bytes.Length - $off) % 2)
+            if ($len -le 0) { continue }
+            $s = [System.Text.Encoding]::Unicode.GetString($bytes, $off, $len)
+            if ($s.IndexOf($Path, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+        }
+        return $false
+    } catch {
+        return $null
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # [审计 P0-1] 找到刚挂上的那块盘：按完整路径找，绝不只看文件名。
 #
 # 原来写的是 "Location -like *文件名*"，只要同名的盘就命中，紧接着就是 select disk N + clean。
@@ -1723,12 +1763,26 @@ function Install-BootEntry {
         $dm = [regex]::Match($chk.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
         $backFull = ''
         if ($dm.Success) { $backFull = Get-FullPathFromBcdDevice $dm.Groups[1].Value.Trim() }
-        if ($backFull -eq $wantFull) { break }
+        # 路径里的中文被打成 "?" 只是控制台显示不出来，BCD 里存的是对的
+        if (Test-BcdTextSame $wantFull $backFull) {
+            if ($backFull -ne $wantFull) {
+                Write-Log ("路径读回是 ""{0}""：控制台代码页显示不了这些字，BCD 里存的是 {1}" -f $backFull, $wantFull) 'WARN'
+            }
+            break
+        }
+        # 还是不一样：直接问 BCD 存储本身，绕开控制台
+        $stored = Test-BcdStoresPath $wantFull
+        if ($stored -eq $true) {
+            Write-Log '控制台把回读显示弄花了，但导出的 BCD 存储里确实是正确路径' 'WARN'
+            break
+        }
         Write-Log ("设备路径读回不一致（第 {0} 次）：期望 {1}，实际 {2}" -f $attempt, $wantFull, $backFull) 'WARN'
         if ($attempt -ge 2) {
             $r.Error = ("启动菜单指向的文件路径不对，装完也进不去。`n`n" +
                         "应该指向：$wantFull`n实际写成：$backFull`n`n" +
-                        "常见原因：改 BCD 时虚拟磁盘还挂载着，bcdedit 会把 vhd= 换成内部的 partition=X:。`n" +
+                        "如果「实际写成」里是「?」而路径本来有中文，那只是控制台代码页的显示问题：" +
+                        "可以先 chcp 936 再 bcdedit /enum $guid 看一眼。`n" +
+                        "否则多半是改 BCD 时虚拟磁盘还挂载着，bcdedit 把 vhd= 换成了 partition=X:。`n" +
                         "可以运行「急救工具\修好菜单指向」重试，或换个不含中文的目录再装。")
             return $r
         }
@@ -1744,6 +1798,15 @@ function Install-BootEntry {
     # 字段名在德语系统是 "Beschreibung"、日语 "説明"、中文 "描述"。
     $descBack = ''
     if ($chk.Raw -match [regex]::Escape($desc)) { $descBack = $desc }
+    if ($descBack -ne $desc) {
+        # 被 "?" 遮住只是显示问题，别因此把名字换成英文
+        $looseDesc = ($desc -replace '[^\x20-\x7E]', '?')
+        $looseRaw = ($chk.Raw -replace '[^\x20-\x7E]', '?')
+        if ($looseRaw -match [regex]::Escape($looseDesc)) {
+            $descBack = $desc
+            Write-Log "描述被控制台代码页遮住了，保留「$desc」" 'WARN'
+        }
+    }
     if ($descBack -ne $desc) {
         Write-Log "描述读回不一致（期望「$desc」，实际「$descBack」），改用不含中文的写法" 'WARN'
         $asciiName = ($desc -replace '[^\x20-\x7E]', '').Trim()
@@ -2379,6 +2442,32 @@ exit 0
         $espLetter = $be.EspLetter
 
         if (-not $be.Ok) {
+            # [recovery] 这一步失败也要留下状态文件。虚拟磁盘本身是完整的，而修复工具只认这个文件——
+            # 否则下面提示「去跑修复启动菜单」，修复工具会说「没找到本工具装的系统」。
+            if ($be.Guid) {
+                $partialPath = [System.IO.Path]::ChangeExtension($vhdPath, '.boot.txt')
+                try {
+                    $pl = @(
+                        "# $($Script:ProductName) - 部分状态（注册启动项这一步失败，磁盘本身完整）",
+                        "Version=$($Script:Version)",
+                        "Name=$safeName",
+                        "Desc=$($be.Desc)",
+                        "VhdPath=$vhdPath",
+                        "Guid=$($be.Guid)",
+                        "Description=$($be.Desc)",
+                        "BcdPath=$($be.BcdPath)",
+                        "OrigTimeout=$($be.OrigTimeout)",
+                        "OrigDisplayMenu=$($be.OrigDisplay)",
+                        "OrigDisplayMenuSet=$($be.OrigDisplaySet)",
+                        "BcdBackup=$($be.Backup)",
+                        "Created=$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
+                    )
+                    [System.IO.File]::WriteAllLines($partialPath, $pl, (New-Object System.Text.UTF8Encoding $false))
+                    Write-Log "已写入部分状态文件，修复工具能找到这块盘：$partialPath" 'WARN'
+                } catch {
+                    Write-Log "部分状态文件写不进去：$($_.Exception.Message)" 'WARN'
+                }
+            }
             throw ("配置启动菜单失败。`n`n" +
                    "系统文件已经完整写进虚拟磁盘了（DISM 成功），只是最后一步「注册启动项」没成功。`n`n" +
                    "原因：$($be.Error)`n`n" +

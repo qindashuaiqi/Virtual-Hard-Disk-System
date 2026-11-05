@@ -282,6 +282,49 @@ function Get-FullPathFromBcdDevice {
     return ("{0}:\{1}" -f $m.Groups[1].Value.ToUpper(), $m.Groups[2].Value)
 }
 
+# bcdedit prints through the console code page, so a character the page cannot carry comes
+# back as "?". The English launcher runs "chcp 437", which turned every Chinese character in
+# a path into "?" and made a correct BCD write look like a wrong path. The store is fine;
+# compare tolerantly instead of aborting.
+function Test-BcdTextSame {
+    param([string]$Want, [string]$Got)
+    if ($null -eq $Got) { return $false }
+    if ($Got -eq $Want) { return $true }
+    if ($Got.Length -ne $Want.Length) { return $false }
+    for ($i = 0; $i -lt $Want.Length; $i++) {
+        if ($Got[$i] -eq $Want[$i]) { continue }
+        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
+        return $false
+    }
+    return $true
+}
+
+# Second opinion that never goes through the console: export the store and look for the path
+# as UTF-16 inside the hive (a BCD store is a registry hive, string elements are UTF-16).
+# Returns $true / $false, or $null when the export was not possible.
+function Test-BcdStoresPath {
+    param([string]$Path)
+    if (-not $Path) { return $null }
+    $tmp = Join-Path $env:TEMP ("bcd-verify-{0}.bcd" -f ([guid]::NewGuid().ToString('N')))
+    try {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        [void](& bcdedit /export $tmp 2>&1 | Out-String)
+        if (-not (Test-Path -LiteralPath $tmp)) { return $null }
+        $bytes = [System.IO.File]::ReadAllBytes($tmp)
+        foreach ($off in 0, 1) {
+            $len = $bytes.Length - $off - (($bytes.Length - $off) % 2)
+            if ($len -le 0) { continue }
+            $s = [System.Text.Encoding]::Unicode.GetString($bytes, $off, $len)
+            if ($s.IndexOf($Path, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+        }
+        return $false
+    } catch {
+        return $null
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # [audit P0-1] Find the disk that was just attached, by FULL PATH - never by file name alone.
 #
 # The hazard this replaces: "Location -like *<file name>*" picks any disk whose file has the same
@@ -1726,12 +1769,26 @@ function Install-BootEntry {
         $dm = [regex]::Match($chk.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
         $backFull = ''
         if ($dm.Success) { $backFull = Get-FullPathFromBcdDevice $dm.Groups[1].Value.Trim() }
-        if ($backFull -eq $wantFull) { break }
+        # "?" where the path has a non-ASCII character is a console display artefact, not a bad write
+        if (Test-BcdTextSame $wantFull $backFull) {
+            if ($backFull -ne $wantFull) {
+                Write-Log ("Path read back as ""{0}"" - the console code page cannot show those characters, the store holds {1}" -f $backFull, $wantFull) 'WARN'
+            }
+            break
+        }
+        # Still different: ask the store directly, bypassing the console
+        $stored = Test-BcdStoresPath $wantFull
+        if ($stored -eq $true) {
+            Write-Log 'The console mangles the readback, but the exported store does contain the correct path' 'WARN'
+            break
+        }
         Write-Log ("Device path read back differs (attempt {0}): expected {1}, got {2}" -f $attempt, $wantFull, $backFull) 'WARN'
         if ($attempt -ge 2) {
-            $r.Error = ("The boot entry points at the wrong file path, so it will not boot either.`n`n" +
+            $r.Error = ("The boot entry points at a different file path, so it will not boot either.`n`n" +
                         "It should point at: $wantFull`nActually written: $backFull`n`n" +
-                        "Common cause: the virtual disk was still mounted while the BCD was edited, and bcdedit rewrote vhd= into an internal partition=X:.`n" +
+                        "If ""actually written"" shows ""?"" where the path has non-ASCII characters, that is only the console code page: " +
+                        "run  chcp 936  then  bcdedit /enum $guid  to see the real text.`n" +
+                        "Otherwise the virtual disk was probably still mounted while the BCD was edited, and bcdedit rewrote vhd= into partition=X:.`n" +
                         "Run ""tools\Fix-Boot-Entry-Device.bat"" to retry, or reinstall into a folder without non-ASCII characters.")
             return $r
         }
@@ -1747,6 +1804,15 @@ function Install-BootEntry {
     # the label is "description", "Beschreibung", "説明" or "描述" depending on the host language.
     $descBack = ''
     if ($chk.Raw -match [regex]::Escape($desc)) { $descBack = $desc }
+    if ($descBack -ne $desc) {
+        # A "?"-masked readback is a display problem; renaming a good entry to ASCII is worse
+        $looseDesc = ($desc -replace '[^\x20-\x7E]', '?')
+        $looseRaw = ($chk.Raw -replace '[^\x20-\x7E]', '?')
+        if ($looseRaw -match [regex]::Escape($looseDesc)) {
+            $descBack = $desc
+            Write-Log "Description read back masked by the console code page, keeping ""$desc""" 'WARN'
+        }
+    }
     if ($descBack -ne $desc) {
         Write-Log "Description read back differs (expected ""$desc"", got ""$descBack""), retrying with an ASCII-only description" 'WARN'
         $asciiName = ($desc -replace '[^\x20-\x7E]', '').Trim()
@@ -2383,6 +2449,33 @@ exit 0
         $espLetter = $be.EspLetter
 
         if (-not $be.Ok) {
+            # [recovery] Keep a state file even here. The virtual disk is complete, and the repair
+            # tools find a system only through this file - without it, the advice below ("run
+            # Repair-Boot-Menu") ends in "no virtual system installed by this toolkit was found".
+            if ($be.Guid) {
+                $partialPath = [System.IO.Path]::ChangeExtension($vhdPath, '.boot.txt')
+                try {
+                    $pl = @(
+                        "# $($Script:ProductName) - partial state (the boot entry step failed, the disk itself is complete)",
+                        "Version=$($Script:Version)",
+                        "Name=$safeName",
+                        "Desc=$($be.Desc)",
+                        "VhdPath=$vhdPath",
+                        "Guid=$($be.Guid)",
+                        "Description=$($be.Desc)",
+                        "BcdPath=$($be.BcdPath)",
+                        "OrigTimeout=$($be.OrigTimeout)",
+                        "OrigDisplayMenu=$($be.OrigDisplay)",
+                        "OrigDisplayMenuSet=$($be.OrigDisplaySet)",
+                        "BcdBackup=$($be.Backup)",
+                        "Created=$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
+                    )
+                    [System.IO.File]::WriteAllLines($partialPath, $pl, (New-Object System.Text.UTF8Encoding $false))
+                    Write-Log "Partial state file written so the repair tools can find this disk: $partialPath" 'WARN'
+                } catch {
+                    Write-Log "Could not write the partial state file: $($_.Exception.Message)" 'WARN'
+                }
+            }
             throw ("Failed to configure the boot menu.`n`n" +
                    "The system files are fully written into the virtual disk (DISM succeeded); only the last step, registering the boot entry, failed.`n`n" +
                    "Reason: $($be.Error)`n`n" +
