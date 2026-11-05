@@ -20,6 +20,13 @@ def pack(src_subdir, out_dir, version):
     out = os.path.join(out_dir, 'Virtual-Hard-Disk-System-%s-%s.zip' % (version, src_subdir))
     count = 0
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
+        # MIT requires the copyright + license text to be shipped with every
+        # copy, so put a LICENSE at the top of each distributable folder.
+        license_path = os.path.join(REPO, 'LICENSE')
+        if not os.path.isfile(license_path):
+            raise SystemExit('LICENSE not found at repo root: %s' % license_path)
+        z.write(license_path, os.path.join(src_subdir, 'LICENSE'))
+        count += 1
         for root, dirs, files in os.walk(src):
             dirs[:] = [d for d in dirs if d != '__pycache__']
             for f in files:

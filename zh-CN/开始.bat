@@ -120,12 +120,12 @@ pause
 goto menu
 
 :doc
-if not exist "%~dp0使用说明.md" goto nodoc
-start "" notepad "%~dp0使用说明.md"
+if not exist "%~dp0USER-GUIDE.md" goto nodoc
+start "" notepad "%~dp0USER-GUIDE.md"
 goto menu
 :nodoc
 echo.
-echo    [提示] 使用说明.md 不在这个文件夹里。
+echo    [提示] USER-GUIDE.md 不在这个文件夹里。
 pause
 goto menu
 
