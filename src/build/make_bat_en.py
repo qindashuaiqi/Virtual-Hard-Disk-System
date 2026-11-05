@@ -38,10 +38,11 @@ rem error on screen.
 fltmc >nul 2>&1
 if errorlevel 1 (
     echo   Requesting administrator rights - confirm the UAC prompt...
-    if "%~1"=="" (
-        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    set "ELEV_ARGS=%*"
+    if defined ELEV_ARGS (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList $env:ELEV_ARGS } catch { exit 9 }"
     ) else (
-        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' } catch { exit 9 }"
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
     )
     if errorlevel 9 (
         echo.

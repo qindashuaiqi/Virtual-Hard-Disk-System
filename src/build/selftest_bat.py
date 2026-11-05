@@ -36,18 +36,23 @@ MARKER = 'BATTEST_REACHED_LAUNCH'
 
 LAUNCH_RE = re.compile(r'^powershell -NoProfile[^\r\n]*-File "%PS1FILE%"[^\r\n]*$', re.M)
 ELEV_RE = re.compile(r'^fltmc >nul 2>&1\r?\nif errorlevel 1 \($', re.M)
-ARGLIST_RE = re.compile(r"-ArgumentList '%\*'")
-EMPTYARG_GUARD_RE = re.compile(r'if "%~1"==""', re.M)
+# The elevation branch must forward arguments via an environment variable, never by
+# splicing '%*' straight into the -Command string: a path with a single quote (e.g.
+# D:\O'Brien\Win.vhdx) would terminate the -Command string early and break parsing.
+ENV_FWD_RE = re.compile(r'if defined ELEV_ARGS\s*\(', re.M)
+ENV_SET_RE = re.compile(r'set "ELEV_ARGS=%\*"', re.M)
+BAD_SPLICE_RE = re.compile(r"-ArgumentList '%\*'")
 
 
-def lint_arglist_guard(text, name):
-    """A bare -ArgumentList '%*' breaks elevation: Start-Process throws on an
-    empty ArgumentList (exit 9), so a double-clicked launcher with no arguments
-    never gets its UAC prompt. Whenever '%*' is forwarded, there MUST be an
-    empty-argument guard branch (if "%~1"=="") that elevates without it."""
+def lint_elev_forward(text, name):
+    """The elevation branch must forward '%*' through an env var ($env:ELEV_ARGS),
+    not by embedding '%*' directly in -ArgumentList. Verify both the env-var set
+    and the guarded use, and reject the old direct-splice form."""
     bad = []
-    if ARGLIST_RE.search(text) and not EMPTYARG_GUARD_RE.search(text):
-        bad.append('%s  forwards %%* but has no empty-argument guard (if "%%~1"=="")' % name)
+    if BAD_SPLICE_RE.search(text):
+        bad.append('%s  splices %%* directly into -ArgumentList (breaks on single-quote paths); use $env:ELEV_ARGS' % name)
+    elif ENV_SET_RE.search(text) and not ENV_FWD_RE.search(text):
+        bad.append('%s  sets ELEV_ARGS but never forwards it under if defined' % name)
     return bad
 
 
@@ -96,7 +101,7 @@ def run_one(path, encoding, scratch):
         return ('SKIP', '%s  (menu, no payload)' % name, [])
 
     problems = list(lint_parens(lf, name))
-    problems += list(lint_arglist_guard(lf, name))
+    problems += list(lint_elev_forward(lf, name))
 
     test = lf
     if not ELEV_RE.search(test):

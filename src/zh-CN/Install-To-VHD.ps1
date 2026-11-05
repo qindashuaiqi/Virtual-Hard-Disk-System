@@ -1776,7 +1776,9 @@ function Install-BootEntry {
         # 还是不一样：直接问 BCD 存储本身，绕开控制台
         $stored = Test-BcdStoresPath $wantFull
         if ($stored -eq $true) {
-            Write-Log '控制台把回读显示弄花了，但导出的 BCD 存储里确实是正确路径' 'WARN'
+            # [v1.32] 这是整库搜索（启发式），不是定位到本条目的 device 元素：
+            # 旧的启动项若也指向同一文件，同样会返回 true。
+            Write-Log '控制台把回读显示弄花了，且路径在导出的 BCD 存储里能找到（整库启发式，不精确到本条目）' 'WARN'
             break
         }
         Write-Log ("设备路径读回不一致（第 {0} 次）：期望 {1}，实际 {2}" -f $attempt, $wantFull, $backFull) 'WARN'
@@ -1885,6 +1887,11 @@ function Invoke-Install {
 
         if (-not (Test-Admin)) {
             throw '需要管理员权限。请右键本程序选择「以管理员身份运行」。'
+        }
+        # [v1.32] 在动手之前就拒绝 Legacy BIOS。原来在 Install-BootEntry 里才判断，
+        # Legacy 机器会先把整个 VHDX 建好、跑完 DISM，最后一步才被拒 —— 白等几分钟还留下半成品盘。
+        if ((Get-FirmwareType) -ne 2) {
+            throw '这台机器是 Legacy BIOS 启动。原生启动 VHD 走的是 UEFI 引导路径（winload.efi），Legacy BIOS 起不来。`n`n请在固件设置里开启 UEFI 启动（关闭 CSM），或换一台 UEFI 机器用本工具。'
         }
         if (Test-Path -LiteralPath $vhdPath) {
             throw "已经装过一次了。`n目标文件已存在：$vhdPath`n`n请先运行卸载工具，或手动删除该文件。"

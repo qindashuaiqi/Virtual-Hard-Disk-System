@@ -38,10 +38,11 @@ rem 改成先提权、再用普通 -File 运行脚本，任何错误都留在窗
 fltmc >nul 2>&1
 if errorlevel 1 (
     echo   正在申请管理员权限，请在弹窗中选「是」...
-    if "%~1"=="" (
-        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
+    set "ELEV_ARGS=%*"
+    if defined ELEV_ARGS (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList $env:ELEV_ARGS } catch { exit 9 }"
     ) else (
-        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' } catch { exit 9 }"
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { exit 9 }"
     )
     if errorlevel 9 (
         echo.

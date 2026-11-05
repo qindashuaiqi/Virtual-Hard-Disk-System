@@ -1782,7 +1782,9 @@ function Install-BootEntry {
         # Still different: ask the store directly, bypassing the console
         $stored = Test-BcdStoresPath $wantFull
         if ($stored -eq $true) {
-            Write-Log 'The console mangles the readback, but the exported store does contain the correct path' 'WARN'
+            # [v1.32] This is a whole-store search (heuristic), not a check of this specific entry's
+            # device element: an OLD entry pointing at the same file would also make it return true.
+            Write-Log 'The console mangles the readback, and the path is present somewhere in the exported store (whole-store heuristic, not tied to this exact entry)' 'WARN'
             break
         }
         Write-Log ("Device path read back differs (attempt {0}): expected {1}, got {2}" -f $attempt, $wantFull, $backFull) 'WARN'
@@ -1891,6 +1893,12 @@ function Invoke-Install {
 
         if (-not (Test-Admin)) {
             throw 'Administrator rights are required. Right-click this program and choose "Run as administrator".'
+        }
+        # [v1.32] Reject Legacy BIOS up front, before any work is done. This used to sit inside
+        # Install-BootEntry, so a Legacy machine would build the whole VHDX and run DISM first, only
+        # to be rejected at the very last step - wasting minutes and leaving a half-built disk behind.
+        if ((Get-FirmwareType) -ne 2) {
+            throw 'This machine boots in Legacy BIOS mode. Native-boot VHD uses the UEFI boot path (winload.efi) and cannot start from a Legacy BIOS.`n`nPlease enable UEFI boot in the firmware settings (with CSM disabled), or use this tool on a UEFI machine.'
         }
         if (Test-Path -LiteralPath $vhdPath) {
             throw "Already installed once.`nThe target file already exists: $vhdPath`n`nRun the uninstaller first, or delete that file manually."
