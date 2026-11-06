@@ -17,7 +17,7 @@
 # ============================================================
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '1.32'
+$Script:Version = '1.33'
 $Script:OriginDir = $OriginDir
 try { $Host.UI.RawUI.WindowTitle = "全量注入驱动 v$($Script:Version) - connectsegabot" } catch {}
 

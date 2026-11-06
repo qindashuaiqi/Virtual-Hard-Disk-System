@@ -40,7 +40,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Script:OriginDir = $OriginDir
-$Script:Version = '1.32'
+$Script:Version = '1.33'
 $Script:ProductName = 'Virtual Hard Disk System'
 
 # ---- These must be defined before the exception hook is registered ----

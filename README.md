@@ -34,6 +34,14 @@ The new system is a real disk to Windows: it takes drivers, software, Windows Up
 
 ## Changelog
 
+### v1.33
+
+- **Shared module + build-time inlining.** `Say` appeared verbatim in five scripts per language. It now lives once in `src/shared/en/Logging.ps1`; each script dot-sources it, and `src/build/inline_shared.py` splices the module body into the script while packaging. The shipped `.bat` is still one self-extracting file with no runtime dependency and no `Import-Module`.
+- The build now fails loudly when a shared module is missing, when the dot-source points at the other language's folder, or when any dot-source survives inlining.
+- `verify_en.py` / `verify_zh.py` additionally assert that every function defined in a shared module really ends up inside the decoded payload.
+- No behaviour change: console text, prompts, exit codes and log output are identical to v1.32. This release only pays down duplication.
+- All tools bumped to v1.33.
+
 ### v1.32
 
 - **BCD non-ASCII read-back fixed.** `chcp 437` made `bcdedit` echo non-ASCII path characters as `?`, so a *correct* boot entry was reported as "wrong path". The check now tolerates `?` at non-ASCII positions and falls back to a `bcdedit /export` + UTF-16 lookup.

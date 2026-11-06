@@ -15,7 +15,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '1.32'
+$Script:Version = '1.33'
 $Script:LogFile = Join-Path $env:TEMP ("修好菜单指向-{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
 
 function Write-Log {

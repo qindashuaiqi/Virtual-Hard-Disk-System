@@ -31,7 +31,7 @@
 # ============================================================
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '1.32'
+$Script:Version = '1.33'
 $Script:OriginDir = $OriginDir
 try { $Host.UI.RawUI.WindowTitle = "Inject Network Drivers v$($Script:Version) - connectsegabot" } catch {}
 

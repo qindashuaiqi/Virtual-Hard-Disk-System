@@ -69,7 +69,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Script:Version = '1.32'
+$Script:Version = '1.33'
 $Script:TempDir = [System.IO.Path]::GetTempPath()
 if (-not $Script:TempDir) { $Script:TempDir = 'C:\Windows\Temp\' }
 $Script:LogDate = (Get-Date).ToString('yyyyMMdd')

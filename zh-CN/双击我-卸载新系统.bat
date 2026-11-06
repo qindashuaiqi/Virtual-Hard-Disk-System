@@ -55,7 +55,7 @@ set "PS1FILE=%WORKDIR%\Uninstall-VHDSystem.ps1"
 >> "%B64FILE%" echo ueOAguWOn+ezu+e7n+S4jeWPl+W9seWTjeOAgg0KICDmlK/mjIHoo4Xov4flpJrkuKrns7vnu5/v
 >> "%B64FILE%" echo vJrliJfooajph4zmr4/kuKrns7vnu5/ljZXni6zkuIDmnaHvvIzmjInlkI3lrZfliKDpmaTjgIIN
 >> "%B64FILE%" echo CiAg5L2c6ICF77yaY29ubmVjdHNlZ2Fib3QNCiM+DQoNCiRFcnJvckFjdGlvblByZWZlcmVuY2Ug
->> "%B64FILE%" echo PSAnU3RvcCcNCiRTY3JpcHQ6VmVyc2lvbiA9ICcxLjMyJw0KJFNjcmlwdDpQcm9kdWN0TmFtZSA9
+>> "%B64FILE%" echo PSAnU3RvcCcNCiRTY3JpcHQ6VmVyc2lvbiA9ICcxLjMzJw0KJFNjcmlwdDpQcm9kdWN0TmFtZSA9
 >> "%B64FILE%" echo ICfomZrmi5/noaznm5jns7vnu58nDQoNCmZ1bmN0aW9uIFRlc3QtQWRtaW4gew0KICAgICRpZCA9
 >> "%B64FILE%" echo IFtTZWN1cml0eS5QcmluY2lwYWwuV2luZG93c0lkZW50aXR5XTo6R2V0Q3VycmVudCgpDQogICAg
 >> "%B64FILE%" echo JHAgPSBOZXctT2JqZWN0IFNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzUHJpbmNpcGFsKCRpZCkN
