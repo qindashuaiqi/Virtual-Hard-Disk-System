@@ -13,6 +13,8 @@ import base64
 import os
 import sys
 
+from inline_shared import inline_bytes
+
 HERE = os.path.dirname(os.path.abspath(__file__))     # src\build
 SRC = os.path.dirname(HERE)                            # src
 REPO = os.path.dirname(SRC)                            # repo root
@@ -144,6 +146,12 @@ def build(ps1_name, bat_name, title, with_origin=True, keep_window=False, out_di
 
     if raw[:3] != b'\xef\xbb\xbf':
         print('[WARN] %s has no UTF-8 BOM' % ps1_name)
+
+    # Inline src/shared/en/*.ps1 at build time. The self-extracting bat can only
+    # ever hold one ps1, so shared modules have to be baked into the payload.
+    raw, inlined = inline_bytes(raw, 'en')
+    if inlined:
+        print('    inline: %s -> %s' % (ps1_name, ', '.join(inlined)))
 
     b64 = base64.b64encode(raw).decode('ascii')
     chunks = [b64[i:i + 76] for i in range(0, len(b64), 76)]

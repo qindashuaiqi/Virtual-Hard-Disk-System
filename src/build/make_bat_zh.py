@@ -15,6 +15,8 @@
 import base64
 import os
 
+from inline_shared import inline_bytes
+
 HERE = os.path.dirname(os.path.abspath(__file__))     # src\build
 SRC = os.path.dirname(HERE)                            # src
 REPO = os.path.dirname(SRC)                            # 仓库根
@@ -140,6 +142,12 @@ def build(ps1_name, bat_name, title, with_origin=True, keep_window=False):
 
     if raw[:3] != b'\xef\xbb\xbf':
         print('[WARN] %s 缺少 UTF-8 BOM' % ps1_name)
+
+    # 构建期把 src/shared/zh-CN/*.ps1 内联进来。自解压 bat 载荷只能装一个 ps1，
+    # 共享模块没有别的办法带进去。
+    raw, inlined = inline_bytes(raw, 'zh-CN')
+    if inlined:
+        print('    内联: %s -> %s' % (ps1_name, ', '.join(inlined)))
 
     b64 = base64.b64encode(raw).decode('ascii')
     # 每 76 字符一行（certutil 友好）

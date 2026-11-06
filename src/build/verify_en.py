@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """Self-test the English release: decode every embedded payload and compare it
-byte for byte with the source ps1, and check the bat files are ASCII + CRLF."""
+byte for byte with the source ps1 (after shared-module inlining), and check the
+bat files are ASCII + CRLF."""
 import base64
 import glob
 import io
 import os
 import re
 import sys
+
+from inline_shared import inline_bytes
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 EN = os.path.join(REPO, 'en')  # release folder
@@ -47,12 +50,36 @@ for bat, ps1 in PAIRS.items():
     body = re.split(r'-----BEGIN-----', raw.decode('ascii'))[1].split('-----END-----')[0]
     chunks = re.findall(r'echo (\S+)\r?\n', body)
     data = base64.b64decode(''.join(chunks))
-    want = io.open(os.path.join(SRC, ps1), 'rb').read()
-    if data == want:
-        print('OK   %-38s payload == %s (%d bytes)' % (bat, ps1, len(want)))
-    else:
+
+    # The payload is the source ps1 WITH the shared modules inlined at build
+    # time, so compare against the inlined expectation, not the raw source.
+    src_path = os.path.join(SRC, ps1)
+    want, inlined = inline_bytes(io.open(src_path, 'rb').read(), 'en')
+
+    if data != want:
         print('FAIL %-38s payload mismatch: %d vs %d bytes' % (bat, len(data), len(want)))
         fails += 1
+        continue
+
+    # Do not let the comparison above prove itself: assert that every function
+    # defined in an inlined module really exists inside the payload, and that no
+    # run-time dot-source reference survived (it would fail on the user's PC).
+    bad = []
+    for rel in inlined:
+        mod = os.path.join(REPO, 'src', 'shared', rel.replace('/', os.sep))
+        mod_txt = io.open(mod, 'r', encoding='utf-8-sig').read()
+        for fn in re.findall(r'^\s*function\s+([A-Za-z0-9_\-]+)', mod_txt, re.M):
+            if not re.search(rb'function\s+' + fn.encode('ascii') + rb'\b', data):
+                bad.append('missing function %s from %s' % (fn, rel))
+    if re.search(rb'\$PSScriptRoot[\\/]\.\.[\\/]shared', data, re.I):
+        bad.append('a run-time dot-source reference survived inlining')
+    if bad:
+        print('FAIL %-38s %s' % (bat, '; '.join(bad)))
+        fails += 1
+        continue
+
+    extra = (' [+%s]' % ','.join(inlined)) if inlined else ''
+    print('OK   %-38s payload == %s (%d bytes)%s' % (bat, ps1, len(want), extra))
 
 print('\n%d failure(s)' % fails)
 sys.exit(1 if fails else 0)

@@ -22,10 +22,9 @@ $ErrorActionPreference = 'Continue'
 $Script:Version = '1.32'
 try { $Host.UI.RawUI.WindowTitle = "新系统诊断并装驱动 v$($Script:Version) - connectsegabot" } catch {}
 
-function Say {
-    param([string]$Text, [string]$Color = 'Gray')
-    Write-Host $Text -ForegroundColor $Color
-}
+# [v1.32] 共享模块。打包时由 src/build/inline_shared.py 内联本文件，
+# .bat 载荷仍是自包含单文件。
+. "$PSScriptRoot\..\shared\zh-CN\Logging.ps1"
 
 Say ""
 Say "  新系统诊断并装驱动  v$($Script:Version)" 'Cyan'

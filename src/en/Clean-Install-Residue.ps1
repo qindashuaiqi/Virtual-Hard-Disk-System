@@ -26,10 +26,9 @@ $Script:OriginDir = $OriginDir
 
 try { $Host.UI.RawUI.WindowTitle = "Clean Install Residue v$($Script:Version) - connectsegabot" } catch {}
 
-function Say {
-    param([string]$Text, [string]$Color = 'Gray')
-    Write-Host $Text -ForegroundColor $Color
-}
+# [v1.32] Shared module. src/build/inline_shared.py inlines this file at
+# build time, and the .bat payload is still a self-contained single file.
+. "$PSScriptRoot\..\shared\en\Logging.ps1"
 
 Say ""
 Say "  Clean Install Residue  v$($Script:Version)" 'Cyan'

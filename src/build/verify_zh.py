@@ -11,6 +11,8 @@ import os
 import re
 import sys
 
+from inline_shared import inline_bytes
+
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ZH = os.path.join(REPO, 'zh-CN')
 SRC = os.path.join(REPO, 'src', 'zh-CN')
@@ -54,12 +56,34 @@ for bat, ps1 in PAIRS.items():
     body = text.split('-----BEGIN-----')[1].split('-----END-----')[0]
     chunks = re.findall(r'echo (\S+)\r?\n', body)
     data = base64.b64decode(''.join(chunks))
-    want = io.open(os.path.join(SRC, ps1), 'rb').read()
-    if data == want:
-        print('OK   %-46s payload == %s (%d bytes)' % (bat, ps1, len(want)))
-    else:
+
+    # 载荷 = 源 ps1 内联共享模块之后的内容，所以比对基准也要内联
+    src_path = os.path.join(SRC, ps1)
+    want, inlined = inline_bytes(io.open(src_path, 'rb').read(), 'zh-CN')
+
+    if data != want:
         print('FAIL %-46s payload mismatch: %d vs %d bytes' % (bat, len(data), len(want)))
         fails += 1
+        continue
+
+    # 不能只靠上面的比对自证：确认被内联模块里的每个函数真的进了载荷，
+    # 且没有运行期 dot-source 引用残留（那会在用户机器上直接失败）
+    bad = []
+    for rel in inlined:
+        mod = os.path.join(REPO, 'src', 'shared', rel.replace('/', os.sep))
+        mod_txt = io.open(mod, 'r', encoding='utf-8-sig').read()
+        for fn in re.findall(r'^\s*function\s+([A-Za-z0-9_\-]+)', mod_txt, re.M):
+            if not re.search(rb'function\s+' + fn.encode('ascii') + rb'\b', data):
+                bad.append(u'缺少函数 %s（来自 %s）' % (fn, rel))
+    if re.search(rb'\$PSScriptRoot[\\/]\.\.[\\/]shared', data, re.I):
+        bad.append(u'运行期 dot-source 引用没有被内联掉')
+    if bad:
+        print('FAIL %-46s %s' % (bat, u'; '.join(bad)))
+        fails += 1
+        continue
+
+    extra = (u' [+%s]' % u','.join(inlined)) if inlined else u''
+    print('OK   %-46s payload == %s (%d bytes)%s' % (bat, ps1, len(want), extra))
 
 print('\n%d failure(s)' % fails)
 sys.exit(1 if fails else 0)
