@@ -6,7 +6,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '1.33'
+$Script:Version = '1.34'
 $Script:ProductName = 'Virtual Hard Disk System'
 
 function Test-Admin {
@@ -243,6 +243,42 @@ function Show-Gui {
         [System.Windows.Forms.Application]::DoEvents()
     }
 
+    # Split `bcdedit /enum ...` output into one block per boot entry.
+    # Returns @{ Blocks; Raw; Parsed; Ok }; when Ok=$false the caller MUST abort the deletion.
+    #
+    # [v1.34 ROOT CAUSE - read before touching this]
+    # Up to v1.33 this was:   $blocks = $bcdOut -split "(?m)^-{20,}"
+    # That 20 was a made-up magic number. bcdedit's separator length equals the header length:
+    #     "Windows Boot Manager"  20 chars -> 20 dashes
+    #     "Windows Boot Loader"   19 chars -> 19 dashes   <- what /enum osloader prints
+    # 19 < 20, so the regex never matched and the osloader dump was NEVER split:
+    # the whole output became a single block. Three-step chain reaction:
+    #   1) that one big block contains vhd=[C:]\NewSystemDisk.vhdx -> judged an "exact match"
+    #   2) the GUID taken is the FIRST `identifier {...}` in the block - not the vhdx entry,
+    #      but whichever entry bcdedit printed first, i.e. the PHYSICAL host OS
+    #   3) bcdedit /delete on the host OS also removed its winresume, and made bcdedit drop
+    #      the default / displayorder elements from {bootmgr}
+    #      -> next boot fails with 0xc0000098 "does not contain a valid OS entry"
+    # Fix: split on the `identifier {GUID}` line (same approach as the installer and repair
+    # tool), so no dash length is involved; then self-check the block count and refuse to
+    # delete anything when it does not add up.
+    function Split-BcdEntries {
+        param([string]$Text)
+
+        $t = [string]$Text
+        # Every identifier/标识符 line starts one block. Aliases like {current} count too.
+        $idRe = '(?im)^\s*(?:identifier|标识符)\s+\{'
+        $out = @([regex]::Split($t, '(?im)^(?=\s*(?:identifier|标识符)\s+\{)') | Where-Object { $_ -match '\S' })
+
+        $raw = ([regex]::Matches($t, $idRe)).Count
+        $got = 0
+        foreach ($b in $out) { if ($b -match $idRe) { $got++ } }
+
+        # raw must be > 0 (otherwise it is an error message / empty output) and every block
+        # must carry exactly one identifier line.
+        return @{ Blocks = $out; Raw = $raw; Parsed = $got; Ok = (($raw -gt 0) -and ($raw -eq $got)) }
+    }
+
     $script:Items = @()
 
     function Refresh-List {
@@ -306,6 +342,7 @@ function Show-Gui {
             $origTimeout = ''
             $origDisplay = ''
             $origDisplaySet = ''
+            $bcdBackup = ''
             if (Test-Path -LiteralPath $statePath) {
                 $sd = @{}
                 foreach ($ln in (Get-Content -LiteralPath $statePath -Encoding UTF8 -EA SilentlyContinue)) {
@@ -314,6 +351,9 @@ function Show-Gui {
                 if ($sd['Guid'] -match '^\{[0-9a-fA-F-]{36}\}$') { $stateGuid = $sd['Guid'] }
                 if ($sd['OrigTimeout']) { $origTimeout = $sd['OrigTimeout'] }
                 if ($sd['OrigDisplayMenu']) { $origDisplay = $sd['OrigDisplayMenu'] }
+                # [v1.34] BCD backup exported at install time. Needed by the post-delete
+                # self-check below - if the store ends up with no bootable entry, restore it.
+                if ($sd['BcdBackup']) { $bcdBackup = $sd['BcdBackup'] }
                 # Only present since v1.7: 1 = displaybootmenu really was set before the install, 0 = it did not exist.
                 # Old state files lack this key, so leave it empty and let the old logic take the safe direction.
                 if ($sd.ContainsKey('OrigDisplayMenuSet')) { $origDisplaySet = [string]$sd['OrigDisplayMenuSet'] }
@@ -321,12 +361,6 @@ function Show-Gui {
             }
 
             $removed = 0
-            if ($stateGuid) {
-                $del = & bcdedit /delete "$stateGuid" /f 2>&1 | Out-String
-                $t = ($del -replace '\s+', ' ').Trim()
-                Log "Deleting $stateGuid from the record => $t"
-                if ($del -notmatch '找不到|not found|无效|invalid|拒绝|denied') { $removed++ }
-            }
 
             # Delete only the entry pointing at **this one vhdx file**.
             #
@@ -347,10 +381,56 @@ function Show-Gui {
             } catch {}
             if ($exactDev) { Log "Exact-match target: $exactDev" }
 
+            # [v1.34 safety gate] Before deleting the GUID recorded in the state file,
+            # check that it really points at this vhdx.
+            #
+            # Up to v1.33 this was a blind `bcdedit /delete "$stateGuid" /f`. If the GUID in
+            # .boot.txt did not match reality - same vhdx installed more than once, a stale
+            # state file, an entry replaced in the meantime - the delete took out somebody
+            # else's entry, including the host system's, and the next boot died with
+            # 0xc0000098 "The Boot Configuration Data file does not contain a valid OS entry".
+            # Rule: reject logical aliases, reject a path mismatch, only delete entries that
+            # provably belong to this vhdx.
+            if ($stateGuid) {
+                if ($stateGuid -match '^\{(?:current|default|bootmgr|fwbootmgr|memdiag|ramdiskoptions)\}$') {
+                    Log "Refusing: the state file records the alias $stateGuid - deleting it would remove the running/default system"
+                    $stateGuid = ''
+                } elseif (-not $exactDev) {
+                    Log "Cannot compute the target device path; skipping the record-based delete and falling back to the scan below"
+                    $stateGuid = ''
+                } else {
+                    $probe = (& bcdedit /enum "$stateGuid" /v 2>&1 | Out-String)
+                    $probeL = ($probe -replace '[^\x20-\x7E]', '?')
+                    $devL = ($exactDev -replace '[^\x20-\x7E]', '?')
+                    if ($probe -match '找不到|not found|无效|invalid') {
+                        Log "Entry $stateGuid from the record no longer exists, skipping"
+                        $stateGuid = ''
+                    } elseif ($probeL -notmatch [regex]::Escape($devL)) {
+                        Log "Refusing: $stateGuid device is not $exactDev - it may point at the host system, not deleting"
+                        $stateGuid = ''
+                    }
+                }
+            }
+            if ($stateGuid) {
+                $del = & bcdedit /delete "$stateGuid" /f 2>&1 | Out-String
+                $t = ($del -replace '\s+', ' ').Trim()
+                Log "Deleting $stateGuid from the record => $t"
+                if ($del -notmatch '找不到|not found|无效|invalid|拒绝|denied') { $removed++ }
+            }
+
             Log "Looking for boot entries (VHD loader mentioning $fileName)"
 
             $bcdOut = & bcdedit /enum osloader /v 2>&1 | Out-String
-            $blocks = $bcdOut -split "(?m)^-{20,}" | Where-Object { $_ -match '\S' }
+            $split = Split-BcdEntries $bcdOut
+            if (-not $split.Ok) {
+                # When the parse cannot be trusted, delete nothing. Deleting the wrong entry
+                # takes the user's original OS boot entry with it.
+                Log "FATAL: cannot reliably parse the bcdedit output ($($split.Raw) entries in the text, only $($split.Parsed) blocks parsed)"
+                Log "Refusing to continue: neither the virtual disk nor any boot entry was touched."
+                Log "Please send the log above plus the full 'bcdedit /enum osloader /v' output to the author."
+                return
+            }
+            $blocks = $split.Blocks
 
             # Note: -match refreshes $Matches, so the GUID must be captured before the second match
             $hit = New-Object System.Collections.ArrayList
@@ -394,13 +474,17 @@ function Show-Gui {
                     $matchMode = "same-drive fallback ($($vhdLetter):)"
                     foreach ($x in $sameLetter) { [void]$hit.Add($x) }
                 } else {
-                    $matchMode = 'file-name-only fallback (risk: may hit a same-named system on another drive)'
-                    foreach ($x in $sameName) { [void]$hit.Add($x) }
+                    # [v1.34] A file-name-only match is too weak to delete on.
+                    # Two drives each holding a NewSystemDisk.vhdx would take each other out.
+                    # Leave it to the user to confirm.
+                    $matchMode = 'file-name-only fallback (deletion disabled, reporting only)'
                 }
             }
             if ($hit.Count -gt 0) { Log "Matched $($hit.Count) boot entries ($matchMode)" }
-            if ($matchMode -like 'file-name-only*' -and $hit.Count -gt 1) {
-                Log "WARNING: no entry matched by drive letter, and $($hit.Count) matched by file name alone - this may include same-named systems on other drives, review before deciding"
+            if ($matchMode -like 'file-name-only*') {
+                Log "WARNING: $($sameName.Count) entries matched on file name alone - cannot prove they belong to this vhdx, so nothing was deleted."
+                foreach ($x in $sameName) { Log "        candidate $($x.Guid)" }
+                Log "      If you are certain, delete manually: bcdedit /delete {GUID} /f"
             }
 
             foreach ($h in $hit) {
@@ -409,21 +493,83 @@ function Show-Gui {
                 Log "Found boot entry: $($h.Guid)  $desc"
                 $del = & bcdedit /delete "$($h.Guid)" /f 2>&1 | Out-String
                 Log "Delete: $(($del -replace '\s+', ' ').Trim())"
-                $removed++
+                if ($del -notmatch '找不到|not found|无效|invalid|拒绝|denied') { $removed++ }
             }
             Log "Removed $removed boot entries in total"
 
-            # Count how many systems remain after deletion, to decide whether the menu must stay enabled
-            $left = 0
+            # [v1.34 safety gate] After deleting, prove the machine can still boot.
+            #
+            # Up to v1.33 the code only counted how many entries were left, to decide whether
+            # to switch the menu off; it never checked whether {bootmgr} default still pointed
+            # at an existing entry. A dangling default plus zero real osloader entries means
+            # the next boot dies with 0xc0000098 "The Boot Configuration Data file does not
+            # contain a valid OS entry" - not even a menu.
+            #
+            # Two things happen here:
+            #  1) collect the entries that are still genuinely bootable (skip WinRE / recovery / memdiag)
+            #  2) default not among them -> repoint it at a live system; nothing left -> restore the
+            #     backup taken at install time
+            $aliveGuids = New-Object System.Collections.ArrayList
+            $bmDefault = ''
+            $selfCheckOk = $false
             try {
-                # [v1.13] A recovery partition (device ramdisk=) is not a system the user can choose, so it must not count as "one more system".
-                # Otherwise a single-system machine with "original system + recovery partition" looks multi-boot and the menu can never be switched off.
-                $after = (& bcdedit /enum osloader /v 2>&1 | Out-String)
-                foreach ($ab in @($after -split '(?m)^-{20,}' | Where-Object { $_ -match '\S' })) {
-                    if ($ab -match '(?im)^\s*device\s+ramdisk=') { continue }
-                    if ($ab -match '(?:identifier|标识符)\s+\{') { $left++ }
+                $afterRaw = (& bcdedit /enum osloader /v 2>&1 | Out-String)
+                $spAfter = Split-BcdEntries $afterRaw
+                if ($spAfter.Ok) {
+                    $selfCheckOk = $true
+                    foreach ($ab in $spAfter.Blocks) {
+                        if ($ab -notmatch '(?:identifier|标识符)\s+(\{[0-9a-fA-F\-]+\})') { continue }
+                        $g = $Matches[1]
+                        if ($ab -match '(?im)^\s*device\s+ramdisk=') { continue }
+                        if ($ab -match '(?im)(?:description|描述)\s+.*(?:Recovery|恢复|内存诊断|Memory Diagnostic|Windows Boot Manager)') { continue }
+                        if ($ab -notmatch '(?im)(?:device|osdevice)\s+(?:partition=|vhd=)') { continue }
+                        if ($aliveGuids -notcontains $g) { [void]$aliveGuids.Add($g) }
+                    }
+                } else {
+                    Log "WARNING: post-delete self-check cannot parse the bcdedit output ($($spAfter.Raw) in text / $($spAfter.Parsed) parsed), skipping the automatic decision"
                 }
-            } catch {}
+                $bmRaw = (& bcdedit /enum '{bootmgr}' /v 2>&1 | Out-String)
+                $dm = [regex]::Match($bmRaw, '(?im)^\s*(?:default|默认)\s+(\{[0-9a-fA-F\-]+\})')
+                if ($dm.Success) { $bmDefault = $dm.Groups[1].Value }
+            } catch {
+                Log "Post-delete self-check failed: $($_.Exception.Message)"
+            }
+
+            Log "Self-check: $($aliveGuids.Count) bootable system(s) left, default=$bmDefault"
+            if (-not $selfCheckOk) {
+                # Never touch the BCD on unreliable data: no guessing the default, no /import
+                # (an import overwrites the whole store).
+                Log "FATAL: self-check data is unreliable, skipped both the default repair and the backup restore. Verify 'bcdedit /enum' by hand."
+            } elseif (-not ($bmDefault -and ($aliveGuids -contains $bmDefault))) {
+                if ($aliveGuids.Count -gt 0) {
+                    $fix = $aliveGuids[0]
+                    & bcdedit /set '{bootmgr}' default $fix 2>&1 | Out-Null
+                    Log "WARNING: default pointed at $bmDefault (gone); repointed to $fix - otherwise the next boot shows 0xc0000098"
+                } else {
+                    Log "CRITICAL: no bootable system is left in the store"
+                    if ($bcdBackup -and (Test-Path -LiteralPath $bcdBackup)) {
+                        Log "Restoring the BCD backup exported at install time: $bcdBackup"
+                        $imp = & bcdedit /import "$bcdBackup" 2>&1 | Out-String
+                        Log ("Restore result: " + (($imp -replace '\s+', ' ').Trim()))
+                        Log "Backup restored (pre-install state). Reboot to confirm the original system still boots, then clean up leftovers by hand"
+                    } else {
+                        Log "No BCD backup available, manual repair required:"
+                        Log "  Boot the Windows installation media -> Repair your computer -> Command Prompt -> bootrec /rebuildbcd"
+                    }
+                }
+            }
+
+            # Count how many systems remain after deletion, to decide whether the menu must stay enabled.
+            # [v1.34] Reuse the "genuinely bootable" list collected by the self-check above instead of
+            # running bcdedit a third time: the old code used the same -{20,} magic-number split, and
+            # when that never split anything it always counted 1 - and then switched the menu off.
+            if (-not $selfCheckOk) {
+                # On unreliable data assume "another system exists" and keep the menu visible:
+                # an extra menu entry is harmless, a hidden one makes the remaining system unreachable.
+                $left = 2
+            } else {
+                $left = $aliveGuids.Count
+            }
             Log "Boot entries left: $left"
 
             # Restore the boot menu: the install may have changed displaybootmenu / timeout,

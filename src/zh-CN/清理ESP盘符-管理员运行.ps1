@@ -1,7 +1,7 @@
 ﻿# 摘除残留的 ESP 盘符（S:）
 # 需要管理员权限运行。只移除「访问路径」，不改分区数据，绝对安全。
 # 作者：connectsegabot
-$Script:Version = '1.33'
+$Script:Version = '1.34'
 Write-Host ("清理残留盘符 v{0} - 作者：connectsegabot" -f $Script:Version)
 Write-Host "=========================================="
 $espGuid = 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b'

@@ -22,7 +22,7 @@
 # ============================================================
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '1.33'
+$Script:Version = '1.34'
 try { $Host.UI.RawUI.WindowTitle = "New System GPU Check-up v$($Script:Version) - connectsegabot" } catch {}
 
 # [v1.32] Shared module. src/build/inline_shared.py inlines this file at

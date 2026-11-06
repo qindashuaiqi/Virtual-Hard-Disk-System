@@ -62,7 +62,7 @@ set "PS1FILE=%WORKDIR%\修好菜单指向-管理员运行.ps1"
 >> "%B64FILE%" echo rZfmr5Tlr7kNCiAgICAzLiDkuI3lr7nlsLHmlLnlm57mnaXvvJvmnaHnm67kuKLkuoblsLHmjIno
 >> "%B64FILE%" echo rrDlvZXooaXkuIDmnaHvvJvmsqHov5voj5zljZXlsLHliqDlm57ljrsNCg0KICDkuI3liqjomZrm
 >> "%B64FILE%" echo i5/no4Hnm5jph4znmoTns7vnu5/lhoXlrrnvvIzkuI3liqjljp/ns7vnu5/jgIINCiM+DQoNCiRF
->> "%B64FILE%" echo cnJvckFjdGlvblByZWZlcmVuY2UgPSAnU3RvcCcNCiRTY3JpcHQ6VmVyc2lvbiA9ICcxLjMzJw0K
+>> "%B64FILE%" echo cnJvckFjdGlvblByZWZlcmVuY2UgPSAnU3RvcCcNCiRTY3JpcHQ6VmVyc2lvbiA9ICcxLjM0Jw0K
 >> "%B64FILE%" echo JFNjcmlwdDpMb2dGaWxlID0gSm9pbi1QYXRoICRlbnY6VEVNUCAoIuS/ruWlveiPnOWNleaMh+WQ
 >> "%B64FILE%" echo kS17MH0ubG9nIiAtZiAoR2V0LURhdGUgLUZvcm1hdCAneXl5eU1NZGQnKSkNCg0KZnVuY3Rpb24g
 >> "%B64FILE%" echo V3JpdGUtTG9nIHsNCiAgICBwYXJhbShbc3RyaW5nXSRNc2csIFtzdHJpbmddJExldmVsID0gJ0lO

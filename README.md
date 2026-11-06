@@ -34,6 +34,19 @@ The new system is a real disk to Windows: it takes drivers, software, Windows Up
 
 ## Changelog
 
+### v1.34
+
+- **P0 fixed: uninstalling could destroy the host's boot configuration.** `Uninstall-VHDSystem.ps1` split `bcdedit /enum osloader /v` into one block per entry with `-split "(?m)^-{20,}"`. bcdedit prints a separator exactly as long as the section header, and `Windows Boot Loader` is 19 characters - so that regex never matched, the whole dump stayed a single block, and the GUID used for the "exact match" was the first `identifier` line inside it: the **physical host OS**, not the VHD entry. Deleting it also removed its `winresume` and made bcdedit drop the `default` and `displayorder` elements from `{bootmgr}`, so the next boot stopped at `0xc0000098` ("The Boot Configuration Data file does not contain a valid OS entry") with no menu at all.
+- Entry splitting no longer depends on the dash length: `Split-BcdEntries` cuts on the `identifier` / `标识符` line (the same way the installer and the repair tool already did) and then self-checks the block count. If the count does not match the number of identifier lines in the raw text, the uninstall aborts without touching the disk or the store.
+- Deleting the entry recorded in the state file is no longer blind. Logical aliases (`{current}`, `{default}`, `{bootmgr}`, ...) are refused, and the GUID is read back with `bcdedit /enum <guid> /v` so its `device` can be compared against `vhd=[X:]\path\to.vhdx` before anything is deleted.
+- Matching by file name alone no longer deletes anything: with two same-named VHDX files on different drives it only lists the candidates and asks you to confirm by hand.
+- After the deletions the tool verifies that `{bootmgr}` `default` still points at a live, bootable entry and repoints it if it does not. If no bootable entry is left, it restores the BCD backup exported at install time. When the self-check cannot parse the output reliably it refuses to touch the BCD instead of guessing.
+- `$removed` now counts only deletions that actually succeeded.
+- New regression test `src/build/test_bcd_parse.ps1` (24 assertions) replays a realistic 19-dash `bcdedit` dump through both the old and the new splitter, and fails if the old one stops picking the host OS GUID.
+- All tools bumped to v1.34.
+
+
+
 ### v1.33
 
 - **Shared module + build-time inlining.** `Say` appeared verbatim in five scripts per language. It now lives once in `src/shared/en/Logging.ps1`; each script dot-sources it, and `src/build/inline_shared.py` splices the module body into the script while packaging. The shipped `.bat` is still one self-extracting file with no runtime dependency and no `Import-Module`.

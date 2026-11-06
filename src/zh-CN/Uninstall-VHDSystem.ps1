@@ -6,7 +6,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '1.33'
+$Script:Version = '1.34'
 $Script:ProductName = '虚拟硬盘系统'
 
 function Test-Admin {
@@ -238,6 +238,40 @@ function Show-Gui {
         [System.Windows.Forms.Application]::DoEvents()
     }
 
+    # 把 `bcdedit /enum ...` 的输出按「一个启动项一块」切开。
+    # 返回 @{ Blocks; Raw; Parsed; Ok }，Ok=$false 时调用方必须放弃删除。
+    #
+    # 【v1.34 事故根因，务必先读完再改】
+    # v1.33 及以前这里是：  $blocks = $bcdOut -split "(?m)^-{20,}"
+    # 那个 20 是凭空写的魔数。bcdedit 的分隔线长度等于表头文字长度：
+    #     "Windows Boot Manager"  20 字符 → 20 个 '-'
+    #     "Windows Boot Loader"   19 字符 → 19 个 '-'   ← /enum osloader 用的就是这个
+    # 19 < 20，正则永远匹配不上，于是 osloader 枚举**一块都没切开**，
+    # 整份输出成了唯一一个 block。后果连锁三步：
+    #   1) 这个大 block 里含 vhd=[C:]\NewSystemDisk.vhdx → 被判成「精确命中」
+    #   2) GUID 取的是 block 里第一个 `标识符 {...}` —— 不是那个 vhdx 条目，
+    #      而是 bcdedit 排在输出最前面的**原系统**条目
+    #   3) bcdedit /delete 原系统 → 它的 winresume 被连带删除，
+    #      {bootmgr} 的 default / displayorder 元素被一并移除
+    #      → 重启报 0xc0000098「引导配置数据文件不包含有效的操作系统信息」
+    # 修复：按 `标识符 {GUID}` 行切块（和安装器、修复工具里同一套写法），
+    # 不再依赖任何横线长度；切完自校验块数，对不上就返回 Ok=$false 让上层停手。
+    function Split-BcdEntries {
+        param([string]$Text)
+
+        $t = [string]$Text
+        # 一条 identifier/标识符 行就是一块的开头。{current} 这类别名也算，照样计数。
+        $idRe = '(?im)^\s*(?:identifier|标识符)\s+\{'
+        $out = @([regex]::Split($t, '(?im)^(?=\s*(?:identifier|标识符)\s+\{)') | Where-Object { $_ -match '\S' })
+
+        $raw = ([regex]::Matches($t, $idRe)).Count
+        $got = 0
+        foreach ($b in $out) { if ($b -match $idRe) { $got++ } }
+
+        # raw 必须 > 0（否则是报错文本/空输出），且每块恰好对应一个 identifier 行。
+        return @{ Blocks = $out; Raw = $raw; Parsed = $got; Ok = (($raw -gt 0) -and ($raw -eq $got)) }
+    }
+
     $script:Items = @()
 
     function Refresh-List {
@@ -301,6 +335,7 @@ function Show-Gui {
             $origTimeout = ''
             $origDisplay = ''
             $origDisplaySet = ''
+            $bcdBackup = ''
             if (Test-Path -LiteralPath $statePath) {
                 $sd = @{}
                 foreach ($ln in (Get-Content -LiteralPath $statePath -Encoding UTF8 -EA SilentlyContinue)) {
@@ -309,6 +344,8 @@ function Show-Gui {
                 if ($sd['Guid'] -match '^\{[0-9a-fA-F-]{36}\}$') { $stateGuid = $sd['Guid'] }
                 if ($sd['OrigTimeout']) { $origTimeout = $sd['OrigTimeout'] }
                 if ($sd['OrigDisplayMenu']) { $origDisplay = $sd['OrigDisplayMenu'] }
+                # 【v1.34】安装时导出的 BCD 备份。删坏了要能一键还原，见下面「删除后自检」。
+                if ($sd['BcdBackup']) { $bcdBackup = $sd['BcdBackup'] }
                 # v1.7 起才有这个键：1 = 安装前 BCD 里确实写过 displaybootmenu，0 = 原本没有这一项。
                 # 老状态文件没这个键，留空，按老逻辑走安全方向。
                 if ($sd.ContainsKey('OrigDisplayMenuSet')) { $origDisplaySet = [string]$sd['OrigDisplayMenuSet'] }
@@ -316,12 +353,6 @@ function Show-Gui {
             }
 
             $removed = 0
-            if ($stateGuid) {
-                $del = & bcdedit /delete "$stateGuid" /f 2>&1 | Out-String
-                $t = ($del -replace '\s+', ' ').Trim()
-                Log "按记录删除 $stateGuid => $t"
-                if ($del -notmatch '找不到|not found|无效|invalid|拒绝|denied') { $removed++ }
-            }
 
             # 只删指向「这一个 vhdx 文件」的条目。
             #
@@ -342,10 +373,52 @@ function Show-Gui {
             } catch {}
             if ($exactDev) { Log "精确匹配目标: $exactDev" }
 
+            # 【v1.34 安全闸】按状态文件里的 GUID 删除之前，先确认它真的指向这个 vhdx。
+            #
+            # v1.33 及以前这里是 `bcdedit /delete "$stateGuid" /f` 盲删。
+            # 只要 .boot.txt 里的 GUID 和现实对不上——同一个 vhdx 反复装过、
+            # 旧状态文件残留、中途换过条目——删掉的就是别人的启动项；连原系统的
+            # 条目一起没了，重启直接 0xc0000098「BCD 不包含有效的操作系统信息」。
+            # 原则：别名一律拒绝，路径对不上一律拒绝，只删「确实是这个 vhdx」的条目。
+            if ($stateGuid) {
+                if ($stateGuid -match '^\{(?:current|default|bootmgr|fwbootmgr|memdiag|ramdiskoptions)\}$') {
+                    Log "拒绝：状态文件记录的是逻辑别名 $stateGuid，删它会删掉当前/默认系统"
+                    $stateGuid = ''
+                } elseif (-not $exactDev) {
+                    Log "无法算出目标设备路径，跳过按记录删除，改走下面的扫描匹配"
+                    $stateGuid = ''
+                } else {
+                    $probe = (& bcdedit /enum "$stateGuid" /v 2>&1 | Out-String)
+                    $probeL = ($probe -replace '[^\x20-\x7E]', '?')
+                    $devL = ($exactDev -replace '[^\x20-\x7E]', '?')
+                    if ($probe -match '找不到|not found|无效|invalid') {
+                        Log "记录里的条目 $stateGuid 已不存在，跳过"
+                        $stateGuid = ''
+                    } elseif ($probeL -notmatch [regex]::Escape($devL)) {
+                        Log "拒绝：$stateGuid 的 device 不是 $exactDev，可能指向原系统，不删"
+                        $stateGuid = ''
+                    }
+                }
+            }
+            if ($stateGuid) {
+                $del = & bcdedit /delete "$stateGuid" /f 2>&1 | Out-String
+                $t = ($del -replace '\s+', ' ').Trim()
+                Log "按记录删除 $stateGuid => $t"
+                if ($del -notmatch '找不到|not found|无效|invalid|拒绝|denied') { $removed++ }
+            }
+
             Log "查找启动项（含 $fileName 的 VHD 引导）"
 
             $bcdOut = & bcdedit /enum osloader /v 2>&1 | Out-String
-            $blocks = $bcdOut -split "(?m)^-{20,}" | Where-Object { $_ -match '\S' }
+            $split = Split-BcdEntries $bcdOut
+            if (-not $split.Ok) {
+                # 解析不可靠时宁可什么都不删。删错的代价是把用户的原系统引导一起干掉。
+                Log "严重：无法可靠解析 bcdedit 输出（原文 $($split.Raw) 个启动项，只切出 $($split.Parsed) 块）"
+                Log "为避免误删原系统的启动项，已停止本次卸载：虚拟硬盘和启动项都没有动。"
+                Log "请把上面这段日志发给作者，并附上 bcdedit /enum osloader /v 的完整输出。"
+                return
+            }
+            $blocks = $split.Blocks
 
             # 注意：-match 会刷新 $Matches，所以 GUID 必须在第二次匹配之前先取出来
             $hit = New-Object System.Collections.ArrayList
@@ -389,13 +462,17 @@ function Show-Gui {
                     $matchMode = "同盘符兜底（$($vhdLetter):）"
                     foreach ($x in $sameLetter) { [void]$hit.Add($x) }
                 } else {
-                    $matchMode = '仅文件名兜底（风险：可能命中别的盘上的同名系统）'
-                    foreach ($x in $sameName) { [void]$hit.Add($x) }
+                    # 【v1.34】只按文件名匹配时，宁可不删。
+                    # 两块盘各装一份同名 vhdx（默认都叫 NewSystemDisk.vhdx）时，
+                    # 这里会把另一个系统一起删掉。留给用户手工确认。
+                    $matchMode = '仅文件名兜底（已禁用删除，仅提示）'
                 }
             }
             if ($hit.Count -gt 0) { Log "命中 $($hit.Count) 个启动项（$matchMode）" }
-            if ($matchMode -like '仅文件名*' -and $hit.Count -gt 1) {
-                Log "警告：找不到盘符能对上的条目，按文件名命中了 $($hit.Count) 个 —— 可能包含别的盘上的同名系统，请核对后再决定"
+            if ($matchMode -like '仅文件名*') {
+                Log "警告：只在文件名层面匹配到 $($sameName.Count) 个条目，无法确认是不是这一个 vhdx，已跳过不删。"
+                foreach ($x in $sameName) { Log "        候选 $($x.Guid)" }
+                Log "      确认无误后可手动执行：bcdedit /delete {GUID} /f"
             }
 
             foreach ($h in $hit) {
@@ -404,21 +481,79 @@ function Show-Gui {
                 Log "发现启动项: $($h.Guid)  $desc"
                 $del = & bcdedit /delete "$($h.Guid)" /f 2>&1 | Out-String
                 Log "删除: $(($del -replace '\s+', ' ').Trim())"
-                $removed++
+                if ($del -notmatch '找不到|not found|无效|invalid|拒绝|denied') { $removed++ }
             }
             Log "共移除 $removed 个启动项"
 
-            # 数一下删完之后还剩几个系统，用来判断菜单该不该保留
-            $left = 0
+            # 【v1.34 安全闸】删完必须确认这台机器还开得了机。
+            #
+            # v1.33 及以前，删完只数一下「还剩几个」，用来决定菜单要不要关，
+            # 从不检查 {bootmgr} 的 default 指向的条目是否还存在。default 悬空 +
+            # 一个真实 osloader 都不剩 = 重启后 bootmgr 直接报 0xc0000098
+            #「引导配置数据文件不包含有效的操作系统信息」，连开机菜单都不给。
+            #
+            # 这里做两件事：
+            #  1) 收集删完之后仍然「真实可启动」的条目（排除 WinRE / 恢复项 / 内存诊断）
+            #  2) default 不在其中 → 改指到还活着的系统；一个都不剩 → 用安装时的备份还原
+            $aliveGuids = New-Object System.Collections.ArrayList
+            $bmDefault = ''
+            $selfCheckOk = $false
             try {
-                # 【v1.13】恢复分区（device ramdisk=）不是用户能选的系统，不能算进「还剩几个系统」。
-                # 否则「原系统 + 恢复分区」的单系统机器也会被当成多系统，菜单永远关不掉。
-                $after = (& bcdedit /enum osloader /v 2>&1 | Out-String)
-                foreach ($ab in @($after -split '(?m)^-{20,}' | Where-Object { $_ -match '\S' })) {
-                    if ($ab -match '(?im)^\s*device\s+ramdisk=') { continue }
-                    if ($ab -match '(?:identifier|标识符)\s+\{') { $left++ }
+                $afterRaw = (& bcdedit /enum osloader /v 2>&1 | Out-String)
+                $spAfter = Split-BcdEntries $afterRaw
+                if ($spAfter.Ok) {
+                    $selfCheckOk = $true
+                    foreach ($ab in $spAfter.Blocks) {
+                        if ($ab -notmatch '(?:identifier|标识符)\s+(\{[0-9a-fA-F\-]+\})') { continue }
+                        $g = $Matches[1]
+                        if ($ab -match '(?im)^\s*device\s+ramdisk=') { continue }
+                        if ($ab -match '(?im)(?:description|描述)\s+.*(?:Recovery|恢复|内存诊断|Memory Diagnostic|Windows Boot Manager)') { continue }
+                        if ($ab -notmatch '(?im)(?:device|osdevice)\s+(?:partition=|vhd=)') { continue }
+                        if ($aliveGuids -notcontains $g) { [void]$aliveGuids.Add($g) }
+                    }
+                } else {
+                    Log "警告：删除后自检无法解析 bcdedit 输出（原文 $($spAfter.Raw) 个 / 切出 $($spAfter.Parsed) 块），跳过自动判定"
                 }
-            } catch {}
+                $bmRaw = (& bcdedit /enum '{bootmgr}' /v 2>&1 | Out-String)
+                $dm = [regex]::Match($bmRaw, '(?im)^\s*(?:default|默认)\s+(\{[0-9a-fA-F\-]+\})')
+                if ($dm.Success) { $bmDefault = $dm.Groups[1].Value }
+            } catch {
+                Log "删除后自检失败：$($_.Exception.Message)"
+            }
+
+            Log "自检：剩余可启动系统 $($aliveGuids.Count) 个，default=$bmDefault"
+            if (-not $selfCheckOk) {
+                # 解析不可靠时绝不动 BCD：不猜 default、不 import 备份（import 会覆盖整库）。
+                Log "严重：自检数据不可靠，已跳过 default 修复与备份还原。请人工确认 bcdedit /enum 的结果。"
+            } elseif (-not ($bmDefault -and ($aliveGuids -contains $bmDefault))) {
+                if ($aliveGuids.Count -gt 0) {
+                    $fix = $aliveGuids[0]
+                    & bcdedit /set '{bootmgr}' default $fix 2>&1 | Out-Null
+                    Log "警告：default 指向 $bmDefault（已不存在），已改指到 $fix，否则重启会报 0xc0000098"
+                } else {
+                    Log "严重：删完之后 BCD 里一个可启动系统都不剩了"
+                    if ($bcdBackup -and (Test-Path -LiteralPath $bcdBackup)) {
+                        Log "正在用安装时导出的 BCD 备份还原：$bcdBackup"
+                        $imp = & bcdedit /import "$bcdBackup" 2>&1 | Out-String
+                        Log ("还原结果：" + (($imp -replace '\s+', ' ').Trim()))
+                        Log "备份已还原（装之前的状态），请重启确认能进原系统，再手工清理残留的启动项"
+                    } else {
+                        Log "找不到 BCD 备份，需要手动修复："
+                        Log "  Windows 安装盘启动 → 修复计算机 → 命令提示符 → bootrec /rebuildbcd"
+                    }
+                }
+            }
+
+            # 数一下删完之后还剩几个系统，用来判断菜单该不该保留。
+            # 【v1.34】直接复用上面自检收集的「真实可启动」条目，不再多跑一次 bcdedit：
+            # 旧写法又用了那条 -{20,} 魔数切块，切不开时永远只数出 1，于是把菜单关掉。
+            if (-not $selfCheckOk) {
+                # 数据不可靠时按「还有别的系统」处理，保持菜单可见 —— 菜单多显示一次无害，
+                # 关掉菜单导致剩下的系统进不去才是事故。
+                $left = 2
+            } else {
+                $left = $aliveGuids.Count
+            }
             Log "剩余启动项: $left 个"
 
             # 还原开机菜单：装的时候可能改过 displaybootmenu / timeout，

@@ -40,7 +40,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Script:OriginDir = $OriginDir
-$Script:Version = '1.33'
+$Script:Version = '1.34'
 $Script:ProductName = '虚拟硬盘系统'
 
 # ---- 这些必须在注册异常钩子之前定义好 ----

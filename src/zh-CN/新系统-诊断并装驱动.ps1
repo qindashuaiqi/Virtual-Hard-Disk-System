@@ -19,7 +19,7 @@
 # ============================================================
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '1.33'
+$Script:Version = '1.34'
 try { $Host.UI.RawUI.WindowTitle = "新系统诊断并装驱动 v$($Script:Version) - connectsegabot" } catch {}
 
 # [v1.32] 共享模块。打包时由 src/build/inline_shared.py 内联本文件，

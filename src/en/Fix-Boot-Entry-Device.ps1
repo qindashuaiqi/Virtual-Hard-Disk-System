@@ -15,7 +15,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '1.33'
+$Script:Version = '1.34'
 $Script:LogFile = Join-Path $env:TEMP ("Fix-BootEntry-{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
 
 function Write-Log {
