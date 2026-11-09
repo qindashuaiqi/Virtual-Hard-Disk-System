@@ -34,6 +34,21 @@ The new system is a real disk to Windows: it takes drivers, software, Windows Up
 
 ## Changelog
 
+### v1.35
+
+- **Legacy BIOS machines are supported.** They used to fail at the last 1% with "configuring the boot menu failed / UEFI only". Native-boot VHD always had two official paths; up to v1.34 only the UEFI one was implemented:
+
+  | Firmware | vhdx partition table | Loader |
+  |---|---|---|
+  | UEFI | GPT | `\Windows\system32\winload.efi` |
+  | Legacy BIOS | MBR (single primary partition, marked active) | `\Windows\system32\winload.exe` |
+
+- The preflight no longer rejects non-UEFI machines outright. It derives `$vhdStyle` from the firmware (BIOS=MBR / UEFI=GPT) and, when the firmware type cannot be read, prints a concrete diagnostic step instead of a generic error.
+- Partitioning: `Initialize-Disk -PartitionStyle $vhdStyle`; the MBR branch creates the partition explicitly as `-MbrType IFS` and marks it `active` (`Set-Partition -IsActive`, falling back to `diskpart active`, then reads it back).
+- The repair tool supports both firmware types too, and now cross-checks the pair: a **Legacy BIOS machine with a GPT vhdx** is told plainly that adding a boot entry cannot help and a reinstall is required - that is exactly the half-built disk v1.34 and earlier left behind on BIOS machines, which previously only produced an entry that failed with `0xc000000f`.
+- **Caveat**: the BIOS path passes the syntax / structural / regression assertions but has not been run end to end on BIOS-only hardware yet. The tool always exports a `bcd-backup-*.bcd` before touching the BCD, so there is a way back.
+- All tools bumped to v1.35.
+
 ### v1.34
 
 - **P0 fixed: uninstalling could destroy the host's boot configuration.** `Uninstall-VHDSystem.ps1` split `bcdedit /enum osloader /v` into one block per entry with `-split "(?m)^-{20,}"`. bcdedit prints a separator exactly as long as the section header, and `Windows Boot Loader` is 19 characters - so that regex never matched, the whole dump stayed a single block, and the GUID used for the "exact match" was the first `identifier` line inside it: the **physical host OS**, not the VHD entry. Deleting it also removed its `winresume` and made bcdedit drop the `default` and `displayorder` elements from `{bootmgr}`, so the next boot stopped at `0xc0000098` ("The Boot Configuration Data file does not contain a valid OS entry") with no menu at all.

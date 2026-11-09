@@ -40,7 +40,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Script:OriginDir = $OriginDir
-$Script:Version = '1.34'
+$Script:Version = '1.35'
 $Script:ProductName = '虚拟硬盘系统'
 
 # ---- 这些必须在注册异常钩子之前定义好 ----
@@ -1619,10 +1619,16 @@ function Install-BootEntry {
         Error = ''
     }
 
-    if ((Get-FirmwareType) -ne 2) {
-        $r.Error = '只支持 UEFI。这台机器是 Legacy BIOS，虚拟磁盘启动需要另一套引导方式。'
+    # [v1.35] 固件分支：UEFI 用 winload.efi，Legacy BIOS 用 winload.exe。
+    # v1.34 及以前这里是一道死闸（非 UEFI 直接 return 失败），BIOS 机器装到最后一步必然报错。
+    $fwType = Get-FirmwareType
+    if ($fwType -ne 1 -and $fwType -ne 2) {
+        $r.Error = ('判断不出本机固件类型（' + $fwType + '），无法决定用哪个启动加载器。日志：' + $Script:LogFile)
         return $r
     }
+    $isUefi = ($fwType -eq 2)
+    $loaderPath = if ($isUefi) { '\Windows\system32\winload.efi' } else { '\Windows\system32\winload.exe' }
+    Write-Log ("启动加载器: {0}（固件: {1}）" -f $loaderPath, $(if ($isUefi) { 'UEFI' } else { 'Legacy BIOS' }))
 
     # ---------- 定位活动 BCD 存储 ----------
     #
@@ -1739,7 +1745,7 @@ function Install-BootEntry {
     foreach ($s in @(
         @('/set', $guid, 'device',   $dev),
         @('/set', $guid, 'osdevice', $dev),
-        @('/set', $guid, 'path',     '\Windows\system32\winload.efi')
+        @('/set', $guid, 'path',     $loaderPath)
     )) {
         $x = Invoke-BcdEdit -Store '' -BcdArgs $s -Tag 'set'
         if (-not $x.Ok) { $allOk = $false }
@@ -1888,11 +1894,27 @@ function Invoke-Install {
         if (-not (Test-Admin)) {
             throw '需要管理员权限。请右键本程序选择「以管理员身份运行」。'
         }
-        # [v1.32] 在动手之前就拒绝 Legacy BIOS。原来在 Install-BootEntry 里才判断，
-        # Legacy 机器会先把整个 VHDX 建好、跑完 DISM，最后一步才被拒 —— 白等几分钟还留下半成品盘。
-        if ((Get-FirmwareType) -ne 2) {
-            throw '这台机器是 Legacy BIOS 启动。原生启动 VHD 走的是 UEFI 引导路径（winload.efi），Legacy BIOS 起不来。`n`n请在固件设置里开启 UEFI 启动（关闭 CSM），或换一台 UEFI 机器用本工具。'
+        # [v1.35] Legacy BIOS 从「直接拒绝」改成「换一套参数」。
+        #
+        # v1.32 在这里一刀切拒绝非 UEFI 机器，理由是「原生启动 VHD 走 winload.efi」。
+        # 这只对了一半：微软的 native boot 本来有两条路 ——
+        #   UEFI 固件     → GPT 分区表 + \Windows\system32\winload.efi
+        #   Legacy BIOS  → MBR 分区表 + \Windows\system32\winload.exe
+        # 当时只实现了 UEFI 那条，于是所有 Legacy 机器都被挡在门外，而且是在把整个
+        # vhdx 建好、DISM 跑完之后才拒 —— 白等几分钟，还留下一块 GPT 的半成品盘
+        # （BIOS 的 bootmgr 读不了 GPT，那块盘再也救不回来，只能删了重装）。
+        #
+        # 现在两条都做：分区表在「分区」段按 $vhdStyle 建，加载器在 Install-BootEntry 里选。
+        $fwPre = Get-FirmwareType
+        if ($fwPre -ne 1 -and $fwPre -ne 2) {
+            throw ('判断不出这台机器是 UEFI 还是 Legacy BIOS（固件类型返回值 ' + $fwPre + '）。' + "`n`n" +
+                   '请用管理员命令行执行  bcdedit /enum {bootmgr}  看一下输出：' + "`n" +
+                   '  · 有 path  \EFI\Microsoft\Boot\bootmgfw.efi  → UEFI' + "`n" +
+                   '  · 没有 path 行、只有 device / description  → Legacy BIOS' + "`n`n" +
+                   '把输出反馈给开发者。')
         }
+        $vhdStyle = if ($fwPre -eq 1) { 'MBR' } else { 'GPT' }
+        Write-Log ("固件类型: {0}，虚拟磁盘按 {1} 建" -f $(if ($fwPre -eq 2) { 'UEFI' } else { 'Legacy BIOS' }), $vhdStyle)
         if (Test-Path -LiteralPath $vhdPath) {
             throw "已经装过一次了。`n目标文件已存在：$vhdPath`n`n请先运行卸载工具，或手动删除该文件。"
         }
@@ -2084,15 +2106,28 @@ function Invoke-Install {
         Write-Log "diskpart clean: $($dp.Text)"
         if (-not $dp.Ok) { throw "清空虚拟磁盘失败：`n`n$($dp.Text)" }
 
+        # [v1.35] 分区表跟着固件走，不再一刀切 GPT。
+        # Legacy BIOS 的 bootmgr 只认 MBR —— 把 GPT 的 vhdx 交给它，连分区表都解析不了。
         try {
-            Initialize-Disk -Number $diskNum -PartitionStyle GPT -Confirm:$false -EA Stop | Out-Null
+            Initialize-Disk -Number $diskNum -PartitionStyle $vhdStyle -Confirm:$false -EA Stop | Out-Null
         } catch {
-            throw "把虚拟磁盘初始化为 GPT 失败：$($_.Exception.Message)"
+            throw "把虚拟磁盘初始化为 $vhdStyle 失败：$($_.Exception.Message)"
         }
 
         $newPart = $null
         try {
-            $newPart = New-Partition -DiskNumber $diskNum -UseMaximumSize -AssignDriveLetter -EA Stop
+            if ($vhdStyle -eq 'MBR') {
+                # MBR 要显式写成 0x07（IFS，NTFS 用的类型），不写有的环境会落成 0x00。
+                # 老系统上 -MbrType 参数可能不被接受，退一步不带它照常建。
+                try {
+                    $newPart = New-Partition -DiskNumber $diskNum -UseMaximumSize -AssignDriveLetter -MbrType IFS -EA Stop
+                } catch {
+                    Write-Log ("-MbrType IFS 建分区失败，退回不带 MbrType: " + $_.Exception.Message) 'WARN'
+                    $newPart = New-Partition -DiskNumber $diskNum -UseMaximumSize -AssignDriveLetter -EA Stop
+                }
+            } else {
+                $newPart = New-Partition -DiskNumber $diskNum -UseMaximumSize -AssignDriveLetter -EA Stop
+            }
         } catch {
             throw "在虚拟磁盘上创建分区失败：$($_.Exception.Message)"
         }
@@ -2103,6 +2138,33 @@ function Invoke-Install {
             throw "格式化新分区失败：$($_.Exception.Message)"
         }
         Write-Log "已创建单个 NTFS 分区（PartitionNumber=$($newPart.PartitionNumber)）"
+
+        # [v1.35] MBR 必须标 active。
+        # BIOS 的引导链是 bootmgr →「活动分区」的 VBR → 系统。虚拟盘只有一个分区时
+        # 标 active 没有任何副作用，但不标，有的机器直接报「找不到操作系统」。
+        if ($vhdStyle -eq 'MBR') {
+            $actOk = $false
+            try {
+                Set-Partition -DiskNumber $diskNum -PartitionNumber $newPart.PartitionNumber -IsActive $true -EA Stop
+                $actOk = $true
+            } catch {
+                Write-Log ("Set-Partition -IsActive 失败，改用 diskpart active: " + $_.Exception.Message) 'WARN'
+            }
+            if (-not $actOk) {
+                $dpa = Invoke-Diskpart -Tag 'active' -Lines @(
+                    "select disk $diskNum",
+                    ("select partition {0}" -f $newPart.PartitionNumber),
+                    'active',
+                    'exit'
+                )
+                Write-Log "diskpart active: $($dpa.Text)"
+            }
+            $actPart = @(Get-Partition -DiskNumber $diskNum -EA SilentlyContinue) | Where-Object { $_.PartitionNumber -eq $newPart.PartitionNumber } | Select-Object -First 1
+            if ($actPart -and ($null -ne $actPart.IsActive)) {
+                if ([bool]$actPart.IsActive) { Write-Log 'MBR 分区已标为 active ✓' }
+                else { Write-Log '分区没能标成 active，BIOS 下开机可能提示找不到操作系统' 'WARN' }
+            }
+        }
 
         # 找新分区盘符
         Start-Sleep -Milliseconds 800

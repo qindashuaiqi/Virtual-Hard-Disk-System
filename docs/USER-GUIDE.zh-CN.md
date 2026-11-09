@@ -2931,3 +2931,58 @@ BCD 主加载项被清空时（正是修复工具要救的场景），修复工�
 | verify_dist + 解包 bat 直检内嵌 ps1（1.21 / SetupComplete / mount-host / GUID / 68..90 / Minimum=10 / 大小日志 / SzSuggested×3） | 全部符合 |
 
 版本：安装器 1.21 / 修复启动菜单 1.8 / 卸载器 1.11 / 清理残留 1.3。
+
+---
+
+## v1.35：Legacy BIOS 支持（2026-11-09）
+
+### 现象
+
+Legacy BIOS 机器装到最后 1% 弹「安装失败：配置启动菜单失败」，原因一行写着
+「只支持 UEFI。这台机器是 Legacy BIOS…」。系统文件其实**已经完整写进 vhdx**
+（DISM 成功），失败的只是最后一步注册启动项。
+
+更麻烦的是：那块 vhdx 是按 GPT 分的区，而 Legacy BIOS 的 bootmgr 只认 MBR，
+**留着也用不了**，只能删掉重装。也就是说这个「一秒钟的报错」代价是整轮安装作废。
+
+### 原因
+
+原生启动 VHD（native boot）从来不是「只支持 UEFI」，微软的两条路径都在：
+
+| 固件 | vhdx 分区表 | 加载器 |
+|---|---|---|
+| UEFI | GPT，单个分区 | `\Windows\system32\winload.efi` |
+| Legacy BIOS | MBR，单个主分区（标 active） | `\Windows\system32\winload.exe` |
+
+v1.3 踩过「在 vhdx 里建 ESP + bcdboot 写引导」的坑（UEFI 固件只读物理磁盘上的 ESP），
+修完之后只实现了 UEFI 那条，于是 `Install-BootEntry` 里留了一道
+`if ((Get-FirmwareType) -ne 2) { 报错返回 }` 的死闸；v1.32 又把它提前到预检，
+变成「开始之前就拒绝」。
+
+两道闸的判断都没写错，错在把**只做了一半的功能**当成了终态：报错信息说
+「虚拟磁盘启动需要另一套引导方式」，那套方式其实一直存在，只是没实现。
+
+### 改法
+
+- 预检：按固件算 `$vhdStyle`（BIOS=MBR / UEFI=GPT），不再拒绝；读不到固件类型时给出
+  「跑 `bcdedit /enum {bootmgr}` 看有没有 `path \EFI\...`」这种能照着做的步骤
+- 分区：`Initialize-Disk -PartitionStyle $vhdStyle`；MBR 分支显式 `-MbrType IFS`，
+  并标 `active`（`Set-Partition -IsActive`，失败退 `diskpart active`，标完回读）
+- 引导：安装器和修复工具都按固件选 `winload.exe` / `winload.efi`
+- 修复工具新增配对检查：**BIOS + GPT 的 vhdx** 直接说清「补启动项也没用，得重装」，
+  而不是建一条一点就报 `0xc000000f` 的菜单
+
+### 验证
+
+| 项目 | 结果 |
+|---|---|
+| 22 个 ps1 语法解析 | 22/22 零错误 |
+| 结构性断言（死闸已拆 / `$vhdStyle` / `-MbrType IFS` / `-IsActive` / `$loaderPath`、`$loaderFile` / 版本号统一） | 29/29 PASS |
+| `test_bcd_parse.ps1`（v1.34 回归） | 24/24 PASS |
+| `test_bcd_readback.ps1` / `test_p0_lookup.ps1` | 9/9、OK |
+| `check_ui_fit.ps1`（zh / en） | 均 OK |
+| `verify_zh.py` / `verify_en.py` / `selftest_bat.py` | 0 failure / 11 ok |
+
+**边界**：这条路是按微软 native boot 的 BIOS 参数实现的，脚本链路、结构断言、回归测试都过了，
+但**还没在纯 BIOS 真机上跑完一整轮**（手上只有 UEFI 虚拟机）。真机上万一还是起不来，
+安装前导出的 `bcd-backup-*.bcd` 可以还原原引导。

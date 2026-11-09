@@ -34,6 +34,21 @@
 
 ## 更新记录
 
+### v1.35
+
+- **支持 Legacy BIOS 机器。** 以前 Legacy 机器装到最后 1% 必然弹「配置启动菜单失败 / 只支持 UEFI」。原生启动 VHD 本来就有两条官方路径，v1.34 及以前只实现了 UEFI 那条：
+
+  | 固件 | vhdx 分区表 | 加载器 |
+  |---|---|---|
+  | UEFI | GPT | `\Windows\system32\winload.efi` |
+  | Legacy BIOS | MBR（单主分区，标 active） | `\Windows\system32\winload.exe` |
+
+- 预检不再一刀切拒绝非 UEFI 机器，改为按固件算 `$vhdStyle`（BIOS=MBR / UEFI=GPT）；读不到固件类型时给出一条能照着做的排查步骤，而不是笼统报错。
+- 分区：`Initialize-Disk -PartitionStyle $vhdStyle`；MBR 分支显式 `-MbrType IFS` 并标 `active`（`Set-Partition -IsActive`，失败退 `diskpart active`，标完回读确认）。
+- 「修复启动菜单」同步支持两种固件，并新增一道配对检查：**Legacy BIOS + GPT 的 vhdx** 会直接说清「补启动项也没用，必须用新版重装」—— 这正是 v1.34 及以前在 BIOS 机器上留下的那种半成品盘，以前它只会建出一条一点就报 `0xc000000f` 的菜单。
+- **边界**：BIOS 这条路已通过语法 / 结构 / 回归断言，但尚未在纯 BIOS 真机上跑完整轮。工具改 BCD 前一定会导出 `bcd-backup-*.bcd`，真出问题可以用它还原。
+- 全部工具版本统一到 v1.35。
+
 ### v1.34
 
 - **修复 P0：卸载过程可能毁掉原系统的引导配置。** `Uninstall-VHDSystem.ps1` 用 `-split "(?m)^-{20,}"` 把 `bcdedit /enum osloader /v` 的输出切成一个个启动项。但 bcdedit 的分隔线长度等于表头文字长度，`Windows Boot Loader` 是 19 个字符，于是这条正则永远匹配不上，整份输出成了唯一一块；随后「精确匹配」取的是这个块里第一个 `标识符`，也就是**物理机原系统**，而不是那个 VHD 条目。删掉它时连它的 `winresume` 一起消失，`{bootmgr}` 的 `default` / `displayorder` 元素也被一并移除，重启就停在 `0xc0000098`「引导配置数据文件不包含有效的操作系统信息」，连菜单都不给。

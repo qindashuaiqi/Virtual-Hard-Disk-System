@@ -40,7 +40,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Script:OriginDir = $OriginDir
-$Script:Version = '1.34'
+$Script:Version = '1.35'
 $Script:ProductName = 'Virtual Hard Disk System'
 
 # ---- These must be defined before the exception hook is registered ----
@@ -1624,10 +1624,17 @@ function Install-BootEntry {
         Error = ''
     }
 
-    if ((Get-FirmwareType) -ne 2) {
-        $r.Error = 'UEFI only. This machine is Legacy BIOS; booting from a virtual disk needs a different boot path.'
+    # [v1.35] Firmware branch: UEFI uses winload.efi, Legacy BIOS uses winload.exe.
+    # Up to v1.34 this was a hard gate (anything but UEFI returned an error), so a BIOS machine
+    # always failed at the very last step.
+    $fwType = Get-FirmwareType
+    if ($fwType -ne 1 -and $fwType -ne 2) {
+        $r.Error = ('Cannot determine the firmware type (' + $fwType + '), so the boot loader cannot be chosen. Log: ' + $Script:LogFile)
         return $r
     }
+    $isUefi = ($fwType -eq 2)
+    $loaderPath = if ($isUefi) { '\Windows\system32\winload.efi' } else { '\Windows\system32\winload.exe' }
+    Write-Log ("Boot loader: {0} (firmware: {1})" -f $loaderPath, $(if ($isUefi) { 'UEFI' } else { 'Legacy BIOS' }))
 
     # ---------- Locate the active BCD store ----------
     #
@@ -1744,7 +1751,7 @@ function Install-BootEntry {
     foreach ($s in @(
         @('/set', $guid, 'device',   $dev),
         @('/set', $guid, 'osdevice', $dev),
-        @('/set', $guid, 'path',     '\Windows\system32\winload.efi')
+        @('/set', $guid, 'path',     $loaderPath)
     )) {
         $x = Invoke-BcdEdit -Store '' -BcdArgs $s -Tag 'set'
         if (-not $x.Ok) { $allOk = $false }
@@ -1894,12 +1901,28 @@ function Invoke-Install {
         if (-not (Test-Admin)) {
             throw 'Administrator rights are required. Right-click this program and choose "Run as administrator".'
         }
-        # [v1.32] Reject Legacy BIOS up front, before any work is done. This used to sit inside
-        # Install-BootEntry, so a Legacy machine would build the whole VHDX and run DISM first, only
-        # to be rejected at the very last step - wasting minutes and leaving a half-built disk behind.
-        if ((Get-FirmwareType) -ne 2) {
-            throw 'This machine boots in Legacy BIOS mode. Native-boot VHD uses the UEFI boot path (winload.efi) and cannot start from a Legacy BIOS.`n`nPlease enable UEFI boot in the firmware settings (with CSM disabled), or use this tool on a UEFI machine.'
+        # [v1.35] Legacy BIOS is no longer rejected - it just uses a different parameter set.
+        #
+        # v1.32 rejected every non-UEFI machine here, on the grounds that native-boot VHD uses
+        # winload.efi. That is only half the story: Microsoft's native boot has two paths -
+        #   UEFI firmware      -> GPT partition table + \Windows\system32\winload.efi
+        #   Legacy BIOS        -> MBR partition table + \Windows\system32\winload.exe
+        # Only the UEFI one was implemented, so every Legacy machine was turned away *after* the
+        # whole VHDX had been built and DISM had run - wasting minutes and leaving a GPT disk that a
+        # BIOS bootmgr can never read (so it had to be thrown away and rebuilt).
+        #
+        # Both paths are implemented now: the partition table follows $vhdStyle, the loader is
+        # chosen in Install-BootEntry.
+        $fwPre = Get-FirmwareType
+        if ($fwPre -ne 1 -and $fwPre -ne 2) {
+            throw ('Cannot tell whether this machine boots in UEFI or Legacy BIOS mode (Get-FirmwareType returned ' + $fwPre + ').' + "`n`n" +
+                   'Run  bcdedit /enum {bootmgr}  in an admin console and look at the output:' + "`n" +
+                   '  - a path line \EFI\Microsoft\Boot\bootmgfw.efi  -> UEFI' + "`n" +
+                   '  - no path line, only device / description    -> Legacy BIOS' + "`n`n" +
+                   'Report the output to the developer.')
         }
+        $vhdStyle = if ($fwPre -eq 1) { 'MBR' } else { 'GPT' }
+        Write-Log ("Firmware: {0}, virtual disk will be partitioned as {1}" -f $(if ($fwPre -eq 2) { 'UEFI' } else { 'Legacy BIOS' }), $vhdStyle)
         if (Test-Path -LiteralPath $vhdPath) {
             throw "Already installed once.`nThe target file already exists: $vhdPath`n`nRun the uninstaller first, or delete that file manually."
         }
@@ -2092,15 +2115,30 @@ function Invoke-Install {
         Write-Log "diskpart clean: $($dp.Text)"
         if (-not $dp.Ok) { throw "Failed to clean the virtual disk:`n`n$($dp.Text)" }
 
+        # [v1.35] The partition table follows the firmware instead of always being GPT.
+        # A Legacy BIOS bootmgr only understands MBR - hand it a GPT vhdx and it cannot even parse
+        # the partition table.
         try {
-            Initialize-Disk -Number $diskNum -PartitionStyle GPT -Confirm:$false -EA Stop | Out-Null
+            Initialize-Disk -Number $diskNum -PartitionStyle $vhdStyle -Confirm:$false -EA Stop | Out-Null
         } catch {
-            throw "Failed to initialize the virtual disk as GPT: $($_.Exception.Message)"
+            throw "Failed to initialize the virtual disk as $($vhdStyle): $($_.Exception.Message)"
         }
 
         $newPart = $null
         try {
-            $newPart = New-Partition -DiskNumber $diskNum -UseMaximumSize -AssignDriveLetter -EA Stop
+            if ($vhdStyle -eq 'MBR') {
+                # MBR partitions must state type 0x07 (IFS, the NTFS type); otherwise some
+                # environments create a 0x00 (unused) entry and nothing can boot from it.
+                # -MbrType is rejected on very old builds, so fall back to a plain partition.
+                try {
+                    $newPart = New-Partition -DiskNumber $diskNum -UseMaximumSize -AssignDriveLetter -MbrType IFS -EA Stop
+                } catch {
+                    Write-Log ("-MbrType IFS failed, retrying without MbrType: " + $_.Exception.Message) 'WARN'
+                    $newPart = New-Partition -DiskNumber $diskNum -UseMaximumSize -AssignDriveLetter -EA Stop
+                }
+            } else {
+                $newPart = New-Partition -DiskNumber $diskNum -UseMaximumSize -AssignDriveLetter -EA Stop
+            }
         } catch {
             throw "Failed to create the partition on the virtual disk: $($_.Exception.Message)"
         }
@@ -2111,6 +2149,34 @@ function Invoke-Install {
             throw "Failed to format the new partition: $($_.Exception.Message)"
         }
         Write-Log "Single NTFS partition created (PartitionNumber=$($newPart.PartitionNumber))"
+
+        # [v1.35] An MBR partition must be marked active.
+        # The BIOS chain is bootmgr -> the VBR of the *active* partition -> the system. On a
+        # single-partition virtual disk this has no side effects, but without it some machines
+        # report "operating system not found".
+        if ($vhdStyle -eq 'MBR') {
+            $actOk = $false
+            try {
+                Set-Partition -DiskNumber $diskNum -PartitionNumber $newPart.PartitionNumber -IsActive $true -EA Stop
+                $actOk = $true
+            } catch {
+                Write-Log ("Set-Partition -IsActive failed, falling back to diskpart active: " + $_.Exception.Message) 'WARN'
+            }
+            if (-not $actOk) {
+                $dpa = Invoke-Diskpart -Tag 'active' -Lines @(
+                    "select disk $diskNum",
+                    ("select partition {0}" -f $newPart.PartitionNumber),
+                    'active',
+                    'exit'
+                )
+                Write-Log "diskpart active: $($dpa.Text)"
+            }
+            $actPart = @(Get-Partition -DiskNumber $diskNum -EA SilentlyContinue) | Where-Object { $_.PartitionNumber -eq $newPart.PartitionNumber } | Select-Object -First 1
+            if ($actPart -and ($null -ne $actPart.IsActive)) {
+                if ([bool]$actPart.IsActive) { Write-Log 'MBR partition marked active' }
+                else { Write-Log 'The partition could not be marked active; BIOS boot may report "operating system not found"' 'WARN' }
+            }
+        }
 
         # Find the drive letter of the new partition
         Start-Sleep -Milliseconds 800

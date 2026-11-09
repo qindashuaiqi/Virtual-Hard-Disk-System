@@ -69,7 +69,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Script:Version = '1.34'
+$Script:Version = '1.35'
 $Script:TempDir = [System.IO.Path]::GetTempPath()
 if (-not $Script:TempDir) { $Script:TempDir = 'C:\Windows\Temp\' }
 $Script:LogDate = (Get-Date).ToString('yyyyMMdd')
@@ -906,12 +906,17 @@ try {
         throw 'Administrator rights are required. Right-click and choose "Run as administrator", or double-click Repair-Boot-Menu.bat.'
     }
 
+    # [v1.35] Firmware branch: UEFI uses winload.efi, Legacy BIOS uses winload.exe.
+    # Up to v1.34 non-UEFI machines were rejected outright, so a BIOS machine could not even
+    # "add the missing boot entry" - it just saw "the system files are already written" with no menu.
     $fw = Get-FirmwareType
-    Write-Log "Firmware type: $fw (2=UEFI)"
-    if ($fw -ne 2) {
-        throw ('UEFI machines only. This machine reports firmware type ' + $fw + ', and' +
-               'booting from a virtual disk (native boot) needs a different parameter set under Legacy BIOS, which this script does not cover.')
+    if ($fw -ne 1 -and $fw -ne 2) {
+        throw ('Cannot determine the firmware type (returned ' + $fw + '). Run bcdedit /enum {bootmgr} in an admin console: ' +
+               'a path line \EFI\Microsoft\Boot\bootmgfw.efi means UEFI, no path line means Legacy BIOS. Report the result.')
     }
+    $isUefi = ($fw -eq 2)
+    $loaderFile = if ($isUefi) { 'winload.efi' } else { 'winload.exe' }
+    Write-Log ("Firmware type: {0} (1=Legacy BIOS, 2=UEFI), loader: {1}" -f $fw, $loaderFile)
 
     # ---------- Find the vhdx (v1.4: any name, any folder) ----------
     $pick = Select-VhdForRepair -Explicit $VhdPath -OriginDir $OriginDir
@@ -951,6 +956,24 @@ try {
     if ($diskNum -lt 0) { throw 'Failed to mount the virtual disk (the system did not pick up the disk).' }
     $mounted = $true
     Write-Log "Virtual disk number: $diskNum"
+
+    # [v1.35] Firmware and partition table must match, otherwise adding a boot entry is pointless:
+    #   a Legacy BIOS bootmgr only reads MBR, a GPT vhdx is unreadable to it;
+    #   UEFI boots through bootmgfw.efi + GPT, so an MBR vhdx will not start either.
+    $vhdStyle = ''
+    try { $vhdStyle = [string](Get-Disk -Number $diskNum -EA Stop).PartitionStyle } catch { $vhdStyle = '' }
+    Write-Log "vhdx partition table: $vhdStyle"
+    if (-not $isUefi -and $vhdStyle -eq 'GPT') {
+        throw ('This virtual disk was built for UEFI (GPT partition table) and a Legacy BIOS boot loader cannot read GPT - ' + "`n" +
+               'adding a boot entry will not make it start.' + "`n`n" +
+               'The system files inside are fine; only the partition table format does not match this firmware:' + "`n" +
+               ('  virtual disk: ' + $VhdPath) + "`n`n" +
+               'Reinstall with the new installer (v1.35 and later support Legacy BIOS): delete that file and run it again.' + "`n" +
+               'It will create an MBR partition table and the boot menu will work after a restart.')
+    }
+    if ($isUefi -and $vhdStyle -eq 'MBR') {
+        Write-Log 'Note: this machine is UEFI but the virtual disk is MBR. An MBR vhdx usually will not start under UEFI; consider reinstalling with the new installer.' 'WARN'
+    }
 
     # [v1.32 final gate] Mount-Vhd may have fallen back to "unique file name" matching, which can
     # still pick a different disk that happens to share the file name (same name, another folder).
@@ -1016,7 +1039,7 @@ try {
     Write-Log "System partition: $osLetter`: (partition $($os.Number))"
 
     $need = @(
-        "$($osLetter):\Windows\System32\winload.efi",
+        "$($osLetter):\Windows\System32\$loaderFile",
         "$($osLetter):\Windows\System32\ntoskrnl.exe"
     )
     foreach ($f in $need) {
@@ -1024,7 +1047,7 @@ try {
             throw ("System files missing: $f`nThe system inside the virtual disk is incomplete and must be reinstalled.")
         }
     }
-    Write-Log 'System file check passed (winload.efi / ntoskrnl.exe both present)'
+    Write-Log ("System file check passed ({0} / ntoskrnl.exe both present)" -f $loaderFile)
 
     # Confirm it really is "partition 1" - native boot only recognises the first partition
     if ($os.Number -ne 1) {
@@ -1163,7 +1186,7 @@ try {
     $setList = @(
         @('/set', $guid, 'device',   $vhdDev),
         @('/set', $guid, 'osdevice', $vhdDev),
-        @('/set', $guid, 'path',     '\Windows\system32\winload.efi'),
+        @('/set', $guid, 'path',     ('\Windows\system32\' + $loaderFile)),
         @('/set', $guid, 'detecthal', 'on')
     )
     foreach ($s in $setList) {

@@ -529,7 +529,7 @@ Only two things stay next to the virtual disk: **the vhdx itself** and its **`xx
 
 ### Not verified here
 
-- Legacy BIOS machines (the tool refuses them explicitly instead of half working)
+- Legacy BIOS machines end to end: supported since v1.35 (MBR partition table + `winload.exe`), but so far only the script paths, the structural assertions and the regression tests have been exercised - not a full install on BIOS-only hardware
 - Secure Boot enabled with a modified image (`0xc0000428`)
 - RAID / Intel RST storage controllers
 
@@ -573,4 +573,8 @@ The Chinese guide (`docs/USER-GUIDE.zh-CN.md`) contains the full postmortems, in
 | v1.29 | Logs, BCD backups and reports moved into `<vhdx folder>-logs\` instead of the drive root |
 | v1.30 | Cleaner tool: a broken `Write-Host` call and a silently skipped step 4 (missing `-Force` for Hidden+System files) |
 | v1.31 | **High severity**: the installer and repair tool used to delete `C:\Boot` (a real Windows boot folder) — removed; `C:\EFI` now needs three conditions |
+| v1.32 | Fixed the BCD non-ASCII read-back false alarm; also the version that moved the Legacy BIOS rejection into the preflight |
+| v1.33 | `Say` extracted into a shared module and inlined at build time; no behaviour change |
+| v1.34 | **P0**: the uninstaller could delete the *host* boot entry (`-split "^-{20,}"` never matched a 19-dash dump) - it now splits on `identifier` |
+| v1.35 | **Legacy BIOS support**: MBR partition table + active flag + `winload.exe`; the installer no longer rejects non-UEFI machines |
 | v2.0 | DISM no longer deadlocks at 12% (output goes to a file, the main thread polls); MSR partition handling for a single-partition layout |

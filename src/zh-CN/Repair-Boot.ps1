@@ -69,7 +69,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Script:Version = '1.34'
+$Script:Version = '1.35'
 $Script:TempDir = [System.IO.Path]::GetTempPath()
 if (-not $Script:TempDir) { $Script:TempDir = 'C:\Windows\Temp\' }
 $Script:LogDate = (Get-Date).ToString('yyyyMMdd')
@@ -901,12 +901,17 @@ try {
         throw '需要管理员权限。请右键「以管理员身份运行」，或直接双击「修复启动菜单-管理员运行.bat」。'
     }
 
+    # [v1.35] 固件分支：UEFI 用 winload.efi，Legacy BIOS 用 winload.exe。
+    # v1.34 及以前这里直接拒绝非 UEFI 机器，于是 BIOS 机器连「补启动项」都跑不了，
+    # 只能看着「系统文件已经写好了」却没有菜单。
     $fw = Get-FirmwareType
-    Write-Log "固件类型: $fw （2=UEFI）"
-    if ($fw -ne 2) {
-        throw ('只支持 UEFI 启动的机器。本机固件类型判定为 ' + $fw + '，' +
-               '虚拟磁盘启动（native boot）在 Legacy BIOS 下需要另一套参数，本脚本未覆盖。')
+    if ($fw -ne 1 -and $fw -ne 2) {
+        throw ('判断不出本机固件类型（返回值 ' + $fw + '）。请用管理员命令行执行 bcdedit /enum {bootmgr}，' +
+               '看有没有 path \EFI\Microsoft\Boot\bootmgfw.efi：有就是 UEFI，没有就是 Legacy BIOS，把结果反馈。')
     }
+    $isUefi = ($fw -eq 2)
+    $loaderFile = if ($isUefi) { 'winload.efi' } else { 'winload.exe' }
+    Write-Log ("固件类型: {0}（1=Legacy BIOS，2=UEFI），加载器: {1}" -f $fw, $loaderFile)
 
     # ---------- 找 vhdx（v1.4：任意名字、任意目录） ----------
     $pick = Select-VhdForRepair -Explicit $VhdPath -OriginDir $OriginDir
@@ -946,6 +951,23 @@ try {
     if ($diskNum -lt 0) { throw '虚拟磁盘挂载失败（系统没识别出这块盘）。' }
     $mounted = $true
     Write-Log "虚拟磁盘编号: $diskNum"
+
+    # [v1.35] 固件和虚拟磁盘的分区表必须配对，否则补启动项也是白补：
+    #   Legacy BIOS 的 bootmgr 只认 MBR，GPT 的 vhdx 它连分区表都读不到；
+    #   UEFI 走 bootmgfw.efi + GPT，MBR 的 vhdx 同样起不来。
+    $vhdStyle = ''
+    try { $vhdStyle = [string](Get-Disk -Number $diskNum -EA Stop).PartitionStyle } catch { $vhdStyle = '' }
+    Write-Log "vhdx 分区表: $vhdStyle"
+    if (-not $isUefi -and $vhdStyle -eq 'GPT') {
+        throw ('这个虚拟磁盘是按 UEFI（GPT 分区表）装的，Legacy BIOS 的引导程序读不了 GPT —— 补启动项也起不来。' + "`n`n" +
+               '里面的系统文件是好的，只是分区表格式和这台机器的固件对不上：' + "`n" +
+               ('  虚拟磁盘：' + $VhdPath) + "`n`n" +
+               '只能重装：用新版安装器（v1.35 起支持 Legacy BIOS）删掉旧文件重装一次，' + "`n" +
+               '它会按 BIOS 建 MBR 分区表，装完重启就有菜单了。')
+    }
+    if ($isUefi -and $vhdStyle -eq 'MBR') {
+        Write-Log '注意：本机是 UEFI，但虚拟磁盘是 MBR 分区表。UEFI 下 MBR 的 vhdx 通常起不来，建议用新版重装。' 'WARN'
+    }
 
     # ---------- 删掉 vhdx 内的 ESP，变单分区 ----------
     $vparts = @(Get-Partition -DiskNumber $diskNum -EA SilentlyContinue)
@@ -989,7 +1011,7 @@ try {
     Write-Log "系统分区: $osLetter`: (分区 $($os.Number))"
 
     $need = @(
-        "$($osLetter):\Windows\System32\winload.efi",
+        "$($osLetter):\Windows\System32\$loaderFile",
         "$($osLetter):\Windows\System32\ntoskrnl.exe"
     )
     foreach ($f in $need) {
@@ -997,7 +1019,7 @@ try {
             throw ("系统文件缺失：$f`n虚拟磁盘里的系统不完整，需要重新安装。")
         }
     }
-    Write-Log '系统文件检查通过（winload.efi / ntoskrnl.exe 都在）'
+    Write-Log ("系统文件检查通过（{0} / ntoskrnl.exe 都在）" -f $loaderFile)
 
     # 确认它真的是「分区 1」—— native boot 只认第一个分区
     if ($os.Number -ne 1) {
@@ -1136,7 +1158,7 @@ try {
     $setList = @(
         @('/set', $guid, 'device',   $vhdDev),
         @('/set', $guid, 'osdevice', $vhdDev),
-        @('/set', $guid, 'path',     '\Windows\system32\winload.efi'),
+        @('/set', $guid, 'path',     ('\Windows\system32\' + $loaderFile)),
         @('/set', $guid, 'detecthal', 'on')
     )
     foreach ($s in $setList) {
