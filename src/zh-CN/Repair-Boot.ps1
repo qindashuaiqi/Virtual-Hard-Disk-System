@@ -69,7 +69,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Script:Version = '1.35'
+$Script:Version = '1.36'
 $Script:TempDir = [System.IO.Path]::GetTempPath()
 if (-not $Script:TempDir) { $Script:TempDir = 'C:\Windows\Temp\' }
 $Script:LogDate = (Get-Date).ToString('yyyyMMdd')
@@ -165,21 +165,9 @@ function Get-AnsiEncoding {
         return [System.Text.Encoding]::GetEncoding(936)
     }
 }
-
-# bcdedit 的输出走控制台代码页，打不出来的字会变成 "?"。英文启动器开头是 chcp 437，
-# 中文路径于是整个变成 "?"，写对了也被判成写错。
-function Test-BcdTextSame {
-    param([string]$Want, [string]$Got)
-    if ($null -eq $Got) { return $false }
-    if ($Got -eq $Want) { return $true }
-    if ($Got.Length -ne $Want.Length) { return $false }
-    for ($i = 0; $i -lt $Want.Length; $i++) {
-        if ($Got[$i] -eq $Want[$i]) { continue }
-        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
-        return $false
-    }
-    return $true
-}
+# 【v1.36】Test-BcdTextSame 搬进共享模块了：原来四个脚本各留一份同样的比较逻辑，
+# 改一处得改四处，而且几份会悄悄跑偏。
+. "$PSScriptRoot\..\shared\zh-CN\BcdVerify.ps1"
 
 # 调 diskpart。$Lines 是命令数组，返回 @{ Ok; Text; Path; Error }
 function Invoke-Diskpart {
@@ -209,24 +197,45 @@ function Invoke-Diskpart {
     $clean = ($txt -replace '\s+', ' ').Trim()
     return @{ Ok = (-not $bad); Text = $clean; Path = $f; Error = $(if ($bad) { $clean } else { '' }) }
 }
-
-function Get-FirmwareType {
+# 【v1.36】固件类型判定现在会说明「这个结论是怎么来的」。
+#
+# v1.35 及以前第三层用系统盘的分区表去推：GPT 就当 UEFI、MBR 就当 Legacy BIOS。
+# 那只是相关性，不是事实 —— UEFI 机器可以从带 ESP 的 MBR 盘启动 Windows，
+# BIOS 机器也可能挂着一块 GPT 数据盘。猜错就选错整套参数，装出一块起不来的盘。
+#
+# 现在改为直接问引导管理器本身：bcdedit /enum {bootmgr} /v 在 UEFI 下 path 是
+# \EFI\Microsoft\Boot\bootmgfw.efi，在 BIOS 下 path 是 \bootmgr。分区表仍然会看，
+# 但只当最后一层兜底，而且调用方拒绝拿它当依据动手。
+function Get-FirmwareInfo {
     try {
-        if ($env:firmware_type -eq 'UEFI') { return 2 }
-        if ($env:firmware_type -eq 'Legacy') { return 1 }
+        if ($env:firmware_type -eq 'UEFI') { return @{ Type = 2; Source = 'env' } }
+        if ($env:firmware_type -eq 'Legacy') { return @{ Type = 1; Source = 'env' } }
     } catch {}
     try {
         $v = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control' -Name PEFirmwareType -EA Stop).PEFirmwareType
-        if ($v -eq 2) { return 2 }
-        if ($v -eq 1) { return 1 }
+        if ($v -eq 2) { return @{ Type = 2; Source = 'registry' } }
+        if ($v -eq 1) { return @{ Type = 1; Source = 'registry' } }
+    } catch {}
+    try {
+        $bm = Get-BcdOutputExact -BcdArgs @('/enum', '{bootmgr}', '/v')
+        if ($bm.Ok) {
+            if ($bm.Text -match '(?i)bootmgfw\.efi') { return @{ Type = 2; Source = 'bootmgr-path' } }
+            # \b 保证 "bootmgfw.efi" 不会被这里命中 —— UEFI 那种情况上面已经返回了
+            if ($bm.Text -match '(?i)\\bootmgr\b') { return @{ Type = 1; Source = 'bootmgr-path' } }
+        }
     } catch {}
     try {
         $p = Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':') -EA Stop
         $d = Get-Disk -Number $p.DiskNumber -EA Stop
-        if ($d.PartitionStyle -eq 'GPT') { return 2 }
-        if ($d.PartitionStyle -eq 'MBR') { return 1 }
+        if ($d.PartitionStyle -eq 'GPT') { return @{ Type = 2; Source = 'partition-style' } }
+        if ($d.PartitionStyle -eq 'MBR') { return @{ Type = 1; Source = 'partition-style' } }
     } catch {}
-    return 0
+    return @{ Type = 0; Source = 'unknown' }
+}
+
+# 保留薄封装：只读调用点不用关心来源。
+function Get-FirmwareType {
+    return (Get-FirmwareInfo).Type
 }
 
 # ============================================================
@@ -904,10 +913,26 @@ try {
     # [v1.35] 固件分支：UEFI 用 winload.efi，Legacy BIOS 用 winload.exe。
     # v1.34 及以前这里直接拒绝非 UEFI 机器，于是 BIOS 机器连「补启动项」都跑不了，
     # 只能看着「系统文件已经写好了」却没有菜单。
-    $fw = Get-FirmwareType
+    $fwInfo = Get-FirmwareInfo
+    $fw = $fwInfo.Type
     if ($fw -ne 1 -and $fw -ne 2) {
         throw ('判断不出本机固件类型（返回值 ' + $fw + '）。请用管理员命令行执行 bcdedit /enum {bootmgr}，' +
                '看有没有 path \EFI\Microsoft\Boot\bootmgfw.efi：有就是 UEFI，没有就是 Legacy BIOS，把结果反馈。')
+    }
+    if ($fwInfo.Source -eq 'partition-style') {
+        # 【v1.36】不接受猜：用错加载器补出来的菜单，选中就进不去。
+        throw (@(
+            '固件类型只能靠系统盘的分区表去猜（注册表里没有 PEFirmwareType，bcdedit 也读不到引导管理器路径）。',
+            '',
+            '靠猜去修，很可能补上一条加载器用错的启动项（winload.efi / winload.exe），',
+            '选中照样进不去，所以这次什么都没改。',
+            '',
+            '请用管理员命令行执行  bcdedit /enum {bootmgr}  看 path 那一行：',
+            '  · \EFI\Microsoft\Boot\bootmgfw.efi  → UEFI',
+            '  · \bootmgr                          → Legacy BIOS',
+            '',
+            ('日志：' + $Script:LogFile)
+        ) -join "`n")
     }
     $isUefi = ($fw -eq 2)
     $loaderFile = if ($isUefi) { 'winload.efi' } else { 'winload.exe' }
@@ -966,7 +991,39 @@ try {
                '它会按 BIOS 建 MBR 分区表，装完重启就有菜单了。')
     }
     if ($isUefi -and $vhdStyle -eq 'MBR') {
-        Write-Log '注意：本机是 UEFI，但虚拟磁盘是 MBR 分区表。UEFI 下 MBR 的 vhdx 通常起不来，建议用新版重装。' 'WARN'
+        # 【v1.36】这里以前只写一行 WARN，然后照样往下补 winload.efi 条目。
+        # 用户「修复完成」→ 重启 → 还是 0xc000000f，而日志说修好了。
+        # 和上面 Legacy+GPT 一个原则：已知起不来的组合，一个字都不要往 BCD 里写。
+        throw ('这个虚拟磁盘是按 Legacy BIOS（MBR 分区表）装的，而这台机器是 UEFI 引导 —— ' + "`n" +
+               'UEFI 固件走 GPT 分区表启动，MBR 的盘起不来。' + "`n`n" +
+               '里面的系统文件是好的，只是分区表格式和这台机器的固件对不上：' + "`n" +
+               ('  虚拟磁盘：' + $VhdPath) + "`n`n" +
+               '只能重装：用新版安装器删掉旧文件重装一次，它会按 UEFI 建 GPT 分区表，' + "`n" +
+               '装完重启就有菜单了。')
+    }
+
+    # 【v1.36】Legacy BIOS 的引导程序只把控制权交给「标了 active 的主分区」。
+    # 没有这个标志时，盘读得到、条目也没错，开机仍然报「operating system not found」
+    # 或只有一个光标在闪。安装器从 v1.35 起会标，老版本装的、或手工重新分过区的盘可能没有。
+    if (-not $isUefi -and $vhdStyle -eq 'MBR') {
+        try {
+            $osPart = Get-Partition -DiskNumber $diskNum -EA Stop |
+                      Sort-Object PartitionNumber | Select-Object -First 1
+            if (-not $osPart) { throw '虚拟磁盘上没找到分区' }
+            if ($osPart.IsActive) {
+                Write-Log 'MBR 分区已标 active，Legacy BIOS 引导程序能启动它。'
+            } else {
+                Write-Log 'MBR 分区没有标 active —— Legacy BIOS 引导程序不会启动它。现在补上。' 'WARN'
+                Set-Partition -DiskNumber $diskNum -PartitionNumber $osPart.PartitionNumber -IsActive $true -EA Stop
+                $recheck = Get-Partition -DiskNumber $diskNum -PartitionNumber $osPart.PartitionNumber -EA Stop
+                if (-not $recheck.IsActive) { throw '标志没写进去（读回仍不是 active）' }
+                Write-Log '已标 active，并读回确认。'
+            }
+        } catch {
+            throw ('无法确认 MBR 分区是否已标 active：' + $_.Exception.Message + "`n`n" +
+                   '这个标志缺失时，Legacy BIOS 机器不会启动这块盘。' + "`n" +
+                   '请打开「磁盘管理」，右键该分区 →「将分区标记为活动分区」，然后再跑一次本工具。')
+        }
     }
 
     # ---------- 删掉 vhdx 内的 ESP，变单分区 ----------

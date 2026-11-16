@@ -40,7 +40,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Script:OriginDir = $OriginDir
-$Script:Version = '1.35'
+$Script:Version = '1.36'
 $Script:ProductName = 'Virtual Hard Disk System'
 
 # ---- These must be defined before the exception hook is registered ----
@@ -282,51 +282,16 @@ function Get-FullPathFromBcdDevice {
     return ("{0}:\{1}" -f $m.Groups[1].Value.ToUpper(), $m.Groups[2].Value)
 }
 
-# bcdedit prints through the console code page, so a character the page cannot carry comes
-# back as "?". The English launcher runs "chcp 437", which turned every Chinese character in
-# a path into "?" and made a correct BCD write look like a wrong path. The store is fine;
-# compare tolerantly instead of aborting.
-function Test-BcdTextSame {
-    param([string]$Want, [string]$Got)
-    if ($null -eq $Got) { return $false }
-    if ($Got -eq $Want) { return $true }
-    if ($Got.Length -ne $Want.Length) { return $false }
-    for ($i = 0; $i -lt $Want.Length; $i++) {
-        if ($Got[$i] -eq $Want[$i]) { continue }
-        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
-        return $false
-    }
-    return $true
-}
+# [v1.36] Test-BcdTextSame and the exact-code-page readback now live in one shared module.
+# Four scripts used to carry their own copy of the comparison, so every fix had to be made
+# in four places and the copies could drift apart unnoticed.
+. "$PSScriptRoot\..\shared\en\BcdVerify.ps1"
 
-# Second opinion that never goes through the console: export the store and look for the path
-# as UTF-16 inside the hive (a BCD store is a registry hive, string elements are UTF-16).
-# Returns $true / $false, or $null when the export was not possible.
-function Test-BcdStoresPath {
-    param([string]$Path)
-    if (-not $Path) { return $null }
-    $tmp = Join-Path $env:TEMP ("bcd-verify-{0}.bcd" -f ([guid]::NewGuid().ToString('N')))
-    try {
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-        [void](& bcdedit /export $tmp 2>&1 | Out-String)
-        if (-not (Test-Path -LiteralPath $tmp)) { return $null }
-        $bytes = [System.IO.File]::ReadAllBytes($tmp)
-        foreach ($off in 0, 1) {
-            $len = $bytes.Length - $off - (($bytes.Length - $off) % 2)
-            if ($len -le 0) { continue }
-            $s = [System.Text.Encoding]::Unicode.GetString($bytes, $off, $len)
-            if ($s.IndexOf($Path, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
-        }
-        return $false
-    } catch {
-        return $null
-    } finally {
-        # [v1.32] bcdedit /export also drops .LOG / .LOG1 / .LOG2 next to the hive; clean those too.
-        foreach ($f in @($tmp, "$tmp.LOG", "$tmp.LOG1", "$tmp.LOG2")) {
-            Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
+# [v1.36] The "export the whole store and search it for the path" helper is gone.
+# It was not tied to the entry that had just been written: a stale entry pointing at the same
+# file - or its leftover bytes in the hive - made it return true, so a genuinely wrong write
+# was reported as a successful install. Get-BcdOutputExact (shared module) replaces it by
+# re-reading the one entry with the right console code page.
 
 # [audit P0-1] Find the disk that was just attached, by FULL PATH - never by file name alone.
 #
@@ -718,23 +683,47 @@ function Invoke-Diskpart {
     return @{ Ok = (-not $bad); Text = $clean; Path = $f; Error = $(if ($bad) { $clean } else { '' }) }
 }
 
-function Get-FirmwareType {
+# [v1.36] Firmware detection now reports WHERE the answer came from.
+#
+# Up to v1.35 the third layer guessed from the system disk's partition style. That is a
+# correlation, not a fact: a UEFI machine can start Windows from an MBR disk that carries an
+# ESP, and a BIOS machine can hold a GPT data disk. Guessing wrong picks the wrong parameter
+# set (GPT + winload.efi vs MBR + winload.exe) and builds a disk that cannot boot - the
+# failure only shows up after DISM has written 15+ GB.
+#
+# The answer is now read from the boot manager itself: "bcdedit /enum {bootmgr} /v" prints
+# path \EFI\Microsoft\Boot\bootmgfw.efi under UEFI and path \bootmgr under BIOS. The partition
+# style is still consulted, but only as a last resort, and the installer refuses to build on it.
+function Get-FirmwareInfo {
     try {
-        if ($env:firmware_type -eq 'UEFI') { return 2 }
-        if ($env:firmware_type -eq 'Legacy') { return 1 }
+        if ($env:firmware_type -eq 'UEFI') { return @{ Type = 2; Source = 'env' } }
+        if ($env:firmware_type -eq 'Legacy') { return @{ Type = 1; Source = 'env' } }
     } catch {}
     try {
         $v = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control' -Name PEFirmwareType -EA Stop).PEFirmwareType
-        if ($v -eq 2) { return 2 }
-        if ($v -eq 1) { return 1 }
+        if ($v -eq 2) { return @{ Type = 2; Source = 'registry' } }
+        if ($v -eq 1) { return @{ Type = 1; Source = 'registry' } }
+    } catch {}
+    try {
+        $bm = Get-BcdOutputExact -BcdArgs @('/enum', '{bootmgr}', '/v')
+        if ($bm.Ok) {
+            if ($bm.Text -match '(?i)bootmgfw\.efi') { return @{ Type = 2; Source = 'bootmgr-path' } }
+            # \b keeps "bootmgfw.efi" from matching here - the UEFI case is already returned above
+            if ($bm.Text -match '(?i)\\bootmgr\b') { return @{ Type = 1; Source = 'bootmgr-path' } }
+        }
     } catch {}
     try {
         $p = Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':') -EA Stop
         $d = Get-Disk -Number $p.DiskNumber -EA Stop
-        if ($d.PartitionStyle -eq 'GPT') { return 2 }
-        if ($d.PartitionStyle -eq 'MBR') { return 1 }
+        if ($d.PartitionStyle -eq 'GPT') { return @{ Type = 2; Source = 'partition-style' } }
+        if ($d.PartitionStyle -eq 'MBR') { return @{ Type = 1; Source = 'partition-style' } }
     } catch {}
-    return 0
+    return @{ Type = 0; Source = 'unknown' }
+}
+
+# Kept so the read-only call sites (log footer, diagnostics dump) do not care about the source.
+function Get-FirmwareType {
+    return (Get-FirmwareInfo).Type
 }
 
 function Format-Size([double]$bytes) {
@@ -1627,9 +1616,27 @@ function Install-BootEntry {
     # [v1.35] Firmware branch: UEFI uses winload.efi, Legacy BIOS uses winload.exe.
     # Up to v1.34 this was a hard gate (anything but UEFI returned an error), so a BIOS machine
     # always failed at the very last step.
-    $fwType = Get-FirmwareType
+    $fwInfo = Get-FirmwareInfo
+    $fwType = $fwInfo.Type
     if ($fwType -ne 1 -and $fwType -ne 2) {
         $r.Error = ('Cannot determine the firmware type (' + $fwType + '), so the boot loader cannot be chosen. Log: ' + $Script:LogFile)
+        return $r
+    }
+    if ($fwInfo.Source -eq 'partition-style') {
+        # [v1.36] Refuse to guess. The partition table correlates with the firmware, it is not
+        # the firmware: picking wrong builds a disk this machine cannot boot.
+        $r.Error = (@(
+            'The firmware type could only be guessed from the system disk partition table.',
+            '(PEFirmwareType is missing and bcdedit could not report the boot manager path.)',
+            '',
+            'A guess is not good enough here: choosing the wrong one builds a virtual disk that cannot boot.',
+            '',
+            'Run  bcdedit /enum {bootmgr}  in an administrator console and read the path line:',
+            '  - \EFI\Microsoft\Boot\bootmgfw.efi  -> UEFI',
+            '  - \bootmgr                          -> Legacy BIOS',
+            '',
+            ('Log: ' + $Script:LogFile)
+        ) -join "`n")
         return $r
     }
     $isUefi = ($fwType -eq 2)
@@ -1661,8 +1668,29 @@ function Install-BootEntry {
         $r.Backup = $backup
         Write-Log ("BCD backed up ({0}, {1} bytes): {2}" -f $bk.Mode, $bk.Size, $backup)
     } else {
-        Write-Log ("BCD backup failed, continuing anyway (only an entry is added and the menu timeout changed, both reversible with bcdedit): {0}" -f $bk.Error) 'WARN'
+        # [v1.36] Stop instead of continuing without a rollback path.
+        #
+        # Up to v1.35 this only wrote a WARN and carried on to add and delete boot entries. The
+        # very next operation is a bcdedit write, so "no backup" means "no way back if it goes
+        # wrong", and the uninstaller's own restore step would have nothing to import either.
+        # Nothing has been changed at this point, so stopping here costs nothing.
         $r.Backup = ''
+        $r.Error = (@(
+            'Could not back up the existing BCD, so the install stopped before touching it -',
+            'the boot configuration is exactly as it was.',
+            '',
+            ('Reason: ' + $bk.Error),
+            '',
+            'There is no safe way to edit boot entries without a copy to fall back on.',
+            "Common causes: antivirus blocking 'bcdedit /export', or the log folder is not writable:",
+            ('    ' + $backupDir),
+            '',
+            'Turn the antivirus off for a moment and run the installer again. The virtual disk that was',
+            'already created is kept, so nothing is wasted.',
+            '',
+            ('Log: ' + $Script:LogFile)
+        ) -join "`n")
+        return $r
     }
 
     # On a re-run, delete the entry left by the previous run first
@@ -1776,9 +1804,7 @@ function Install-BootEntry {
         # [audit P1-4] Do not depend on the field label: bcdedit prints "device", "Gerät", "デバイス"
         # or "设备" depending on the host language, and a label mismatch read as "the path is wrong"
         # even though it was written correctly. The only line carrying "vhd=[" is the device line.
-        $dm = [regex]::Match($chk.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
-        $backFull = ''
-        if ($dm.Success) { $backFull = Get-FullPathFromBcdDevice $dm.Groups[1].Value.Trim() }
+        $backFull = Get-FullPathFromBcdDevice (Get-BcdDeviceFromOutput -Text $chk.Raw)
         # "?" where the path has a non-ASCII character is a console display artefact, not a bad write
         if (Test-BcdTextSame $wantFull $backFull) {
             if ($backFull -ne $wantFull) {
@@ -1786,13 +1812,27 @@ function Install-BootEntry {
             }
             break
         }
-        # Still different: ask the store directly, bypassing the console
-        $stored = Test-BcdStoresPath $wantFull
-        if ($stored -eq $true) {
-            # [v1.32] This is a whole-store search (heuristic), not a check of this specific entry's
-            # device element: an OLD entry pointing at the same file would also make it return true.
-            Write-Log 'The console mangles the readback, and the path is present somewhere in the exported store (whole-store heuristic, not tied to this exact entry)' 'WARN'
-            break
+        # [v1.36] Still different: read THIS entry again with the console code page forced to the
+        # system ANSI one, so a non-ASCII path comes back verbatim instead of "?".
+        #
+        # This replaces the v1.32 fallback "does this path appear anywhere in the exported store".
+        # That search was not tied to this entry: a stale entry pointing at the same file - or its
+        # leftover bytes in the hive - satisfied it, so a genuinely wrong write could be reported as
+        # a successful install and died with 0xc000000f on the next boot.
+        $ex = Get-BcdOutputExact -BcdArgs @('/enum', $guid, '/v')
+        if ($ex.Ok) {
+            $exFull = Get-FullPathFromBcdDevice (Get-BcdDeviceFromOutput -Text $ex.Text)
+            if (Test-BcdTextSame $wantFull $exFull) {
+                Write-Log ("Path read back with code page {0}: {1} - matches" -f $ex.CodePage, $exFull)
+                break
+            }
+            if ($exFull) {
+                $backFull = $exFull
+            } else {
+                Write-Log ("With code page {0} open the entry carries no vhd= line at all - the store really holds something else" -f $ex.CodePage) 'WARN'
+            }
+        } else {
+            Write-Log 'Could not re-read the entry with the exact code page (bcdedit did not run); only the console readback is available' 'WARN'
         }
         Write-Log ("Device path read back differs (attempt {0}): expected {1}, got {2}" -f $attempt, $wantFull, $backFull) 'WARN'
         if ($attempt -ge 2) {
@@ -1913,13 +1953,26 @@ function Invoke-Install {
         #
         # Both paths are implemented now: the partition table follows $vhdStyle, the loader is
         # chosen in Install-BootEntry.
-        $fwPre = Get-FirmwareType
+        $fwInfo = Get-FirmwareInfo
+        $fwPre = $fwInfo.Type
         if ($fwPre -ne 1 -and $fwPre -ne 2) {
             throw ('Cannot tell whether this machine boots in UEFI or Legacy BIOS mode (Get-FirmwareType returned ' + $fwPre + ').' + "`n`n" +
                    'Run  bcdedit /enum {bootmgr}  in an admin console and look at the output:' + "`n" +
                    '  - a path line \EFI\Microsoft\Boot\bootmgfw.efi  -> UEFI' + "`n" +
                    '  - no path line, only device / description    -> Legacy BIOS' + "`n`n" +
                    'Report the output to the developer.')
+        }
+        if ($fwInfo.Source -eq 'partition-style') {
+            throw (@(
+                'The firmware type could only be guessed from the system disk partition table, so this install stopped before',
+                'creating anything. Choosing the wrong one builds a virtual disk that this machine cannot boot.',
+                '',
+                'Run  bcdedit /enum {bootmgr}  in an administrator console and read the path line:',
+                '  - \EFI\Microsoft\Boot\bootmgfw.efi  -> UEFI',
+                '  - \bootmgr                          -> Legacy BIOS',
+                '',
+                ('Log: ' + $Script:LogFile)
+            ) -join "`n")
         }
         $vhdStyle = if ($fwPre -eq 1) { 'MBR' } else { 'GPT' }
         Write-Log ("Firmware: {0}, virtual disk will be partitioned as {1}" -f $(if ($fwPre -eq 2) { 'UEFI' } else { 'Legacy BIOS' }), $vhdStyle)
@@ -2142,6 +2195,26 @@ function Invoke-Install {
         } catch {
             throw "Failed to create the partition on the virtual disk: $($_.Exception.Message)"
         }
+
+        # [v1.36] Read the partition type back instead of trusting the call.
+        # The fallback above (plain New-Partition, no -MbrType) can leave an MBR entry with
+        # type 0x00 "unused", which no boot loader will start - and v1.35 carried on with DISM
+        # and the boot entry regardless, producing a disk that is guaranteed not to boot.
+        if ($vhdStyle -eq 'MBR') {
+            $mb = $null
+            try { $mb = Get-Partition -DiskNumber $diskNum -PartitionNumber $newPart.PartitionNumber -EA Stop } catch {}
+            if (-not $mb) {
+                throw 'Could not read the new MBR partition back; refusing to continue with an unknown partition type.'
+            }
+            $mbType = [int]$mb.MbrType
+            if ($mbType -ne 7) {
+                $mbWhy = ('The new partition came out as MBR type 0x{0:X2}, not 0x07 (IFS/NTFS).' -f $mbType)
+                throw ($mbWhy + "`n`n" +
+                       'A Legacy BIOS boot loader will not start a partition of type 0x00, so the install would' + "`n" +
+                       'end with a disk that cannot boot. Nothing has been written into it yet.')
+            }
+            Write-Log ('MBR partition type read back: 0x{0:X2} (IFS) - OK' -f $mbType)
+        }
         try {
             Format-Volume -Partition $newPart -FileSystem NTFS -NewFileSystemLabel 'NewSystem' `
                           -Confirm:$false -Force -EA Stop | Out-Null
@@ -2154,13 +2227,21 @@ function Invoke-Install {
         # The BIOS chain is bootmgr -> the VBR of the *active* partition -> the system. On a
         # single-partition virtual disk this has no side effects, but without it some machines
         # report "operating system not found".
+        #
+        # [v1.36] ...and when it cannot be done, stop here instead of finishing the install.
+        # Up to v1.35 a failure only produced a WARN: the run then spent 10-20 minutes on DISM,
+        # wrote the boot entry, and produced a disk that is guaranteed not to boot. Stopping now
+        # costs ten seconds and leaves nothing behind worth keeping. The diskpart result is
+        # checked too - it used to be logged and ignored.
         if ($vhdStyle -eq 'MBR') {
             $actOk = $false
+            $actWhy = ''
             try {
                 Set-Partition -DiskNumber $diskNum -PartitionNumber $newPart.PartitionNumber -IsActive $true -EA Stop
                 $actOk = $true
             } catch {
-                Write-Log ("Set-Partition -IsActive failed, falling back to diskpart active: " + $_.Exception.Message) 'WARN'
+                $actWhy = $_.Exception.Message
+                Write-Log ("Set-Partition -IsActive failed, falling back to diskpart active: " + $actWhy) 'WARN'
             }
             if (-not $actOk) {
                 $dpa = Invoke-Diskpart -Tag 'active' -Lines @(
@@ -2170,11 +2251,40 @@ function Invoke-Install {
                     'exit'
                 )
                 Write-Log "diskpart active: $($dpa.Text)"
+                if ($dpa.Ok) { $actOk = $true } else { $actWhy = 'diskpart active failed: ' + $dpa.Text }
             }
+            # Read the flag back; a null IsActive means this build cannot report it, so only an
+            # explicit False or "both commands failed" counts as a failure.
+            $actConfirmed = $null
             $actPart = @(Get-Partition -DiskNumber $diskNum -EA SilentlyContinue) | Where-Object { $_.PartitionNumber -eq $newPart.PartitionNumber } | Select-Object -First 1
-            if ($actPart -and ($null -ne $actPart.IsActive)) {
-                if ([bool]$actPart.IsActive) { Write-Log 'MBR partition marked active' }
-                else { Write-Log 'The partition could not be marked active; BIOS boot may report "operating system not found"' 'WARN' }
+            if ($actPart -and ($null -ne $actPart.IsActive)) { $actConfirmed = [bool]$actPart.IsActive }
+            if ($actConfirmed -eq $false -or (($null -eq $actConfirmed) -and (-not $actOk))) {
+                throw (@(
+                    'The MBR partition could not be marked active, so this install stopped before applying',
+                    'the image - nothing has been written to the virtual disk yet.',
+                    '',
+                    'Why it matters: under Legacy BIOS the boot manager only looks at the active partition.',
+                    'Without the flag the machine reports "operating system not found", no matter how',
+                    'perfectly the rest of the install went.',
+                    '',
+                    ('Reason: ' + $actWhy),
+                    '',
+                    'What you can try, in an administrator console:',
+                    '    diskpart',
+                    ('    select disk ' + $diskNum),
+                    ('    select partition ' + $newPart.PartitionNumber),
+                    '    active',
+                    '',
+                    'If that fails as well, the disk may be read-only or still in use: reboot and run the',
+                    'installer again immediately.',
+                    '',
+                    ('Log: ' + $Script:LogFile)
+                ) -join "`n")
+            }
+            if ($actConfirmed -eq $true) {
+                Write-Log 'MBR partition marked active (confirmed by reading the flag back)'
+            } else {
+                Write-Log 'MBR partition marked active (the command reported success; this Windows build does not expose the flag to read back)' 'WARN'
             }
         }
 

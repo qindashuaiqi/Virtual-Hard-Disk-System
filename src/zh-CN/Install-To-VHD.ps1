@@ -40,7 +40,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Script:OriginDir = $OriginDir
-$Script:Version = '1.35'
+$Script:Version = '1.36'
 $Script:ProductName = '虚拟硬盘系统'
 
 # ---- 这些必须在注册异常钩子之前定义好 ----
@@ -282,48 +282,14 @@ function Get-FullPathFromBcdDevice {
     return ("{0}:\{1}" -f $m.Groups[1].Value.ToUpper(), $m.Groups[2].Value)
 }
 
-# bcdedit 的输出走控制台代码页，打不出来的字会变成 "?"。英文启动器开头是 chcp 437，
-# 中文路径于是整个变成 "?"，写对了也被判成写错。BCD 里存的是原文，比较时要容忍这一点。
-function Test-BcdTextSame {
-    param([string]$Want, [string]$Got)
-    if ($null -eq $Got) { return $false }
-    if ($Got -eq $Want) { return $true }
-    if ($Got.Length -ne $Want.Length) { return $false }
-    for ($i = 0; $i -lt $Want.Length; $i++) {
-        if ($Got[$i] -eq $Want[$i]) { continue }
-        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
-        return $false
-    }
-    return $true
-}
+# 【v1.36】Test-BcdTextSame 和「按正确代码页重读」都搬进共享模块了。
+# 原来有四个脚本各留一份拷贝，改一处得改四处，而且几份会悄悄跑偏。
+. "$PSScriptRoot\..\shared\zh-CN\BcdVerify.ps1"
 
-# 完全绕开控制台的第二种判据：把 BCD 导出成文件，在 hive 里按 UTF-16 找这段路径
-# （BCD 就是注册表 hive，字符串元素是 UTF-16 存的）。导不出来时返回 $null。
-function Test-BcdStoresPath {
-    param([string]$Path)
-    if (-not $Path) { return $null }
-    $tmp = Join-Path $env:TEMP ("bcd-verify-{0}.bcd" -f ([guid]::NewGuid().ToString('N')))
-    try {
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-        [void](& bcdedit /export $tmp 2>&1 | Out-String)
-        if (-not (Test-Path -LiteralPath $tmp)) { return $null }
-        $bytes = [System.IO.File]::ReadAllBytes($tmp)
-        foreach ($off in 0, 1) {
-            $len = $bytes.Length - $off - (($bytes.Length - $off) % 2)
-            if ($len -le 0) { continue }
-            $s = [System.Text.Encoding]::Unicode.GetString($bytes, $off, $len)
-            if ($s.IndexOf($Path, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
-        }
-        return $false
-    } catch {
-        return $null
-    } finally {
-        # [v1.32] bcdedit /export 还会在 hive 旁边生成 .LOG / .LOG1 / .LOG2，一起清掉。
-        foreach ($f in @($tmp, "$tmp.LOG", "$tmp.LOG1", "$tmp.LOG2")) {
-            Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
+# 【v1.36】「把整库导出来搜路径」那个判据已经删掉了。
+# 它不针对刚写入的那一条：旧条目只要指向同一个文件（甚至只是 hive 里没压实的残留字节）
+# 就会让它返回 true，于是真写错了也会报「安装成功」。现在由共享模块里的
+# Get-BcdOutputExact 用正确的控制台代码页把这一条重读一遍来替代。
 
 # [审计 P0-1] 找到刚挂上的那块盘：按完整路径找，绝不只看文件名。
 #
@@ -714,23 +680,47 @@ function Invoke-Diskpart {
     return @{ Ok = (-not $bad); Text = $clean; Path = $f; Error = $(if ($bad) { $clean } else { '' }) }
 }
 
-function Get-FirmwareType {
+# 【v1.36】固件类型判定现在会说明「这个结论是怎么来的」。
+#
+# v1.35 及以前第三层用系统盘的分区表去推：GPT 就当 UEFI、MBR 就当 Legacy BIOS。
+# 那只是相关性，不是事实 —— UEFI 机器可以从带 ESP 的 MBR 盘启动 Windows，
+# BIOS 机器也可能挂着一块 GPT 数据盘。猜错的代价是选错整套参数（GPT+winload.efi
+# 还是 MBR+winload.exe），装出一块这台机器根本起不来的盘，而且要等 DISM 写完
+# 十几个 GB 之后才会暴露。
+#
+# 现在改为直接问引导管理器本身：bcdedit /enum {bootmgr} /v 在 UEFI 下 path 是
+# \EFI\Microsoft\Boot\bootmgfw.efi，在 BIOS 下 path 是 \bootmgr。分区表仍然会看，
+# 但只当最后一层兜底，而且安装器拒绝拿它当依据往下走。
+function Get-FirmwareInfo {
     try {
-        if ($env:firmware_type -eq 'UEFI') { return 2 }
-        if ($env:firmware_type -eq 'Legacy') { return 1 }
+        if ($env:firmware_type -eq 'UEFI') { return @{ Type = 2; Source = 'env' } }
+        if ($env:firmware_type -eq 'Legacy') { return @{ Type = 1; Source = 'env' } }
     } catch {}
     try {
         $v = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control' -Name PEFirmwareType -EA Stop).PEFirmwareType
-        if ($v -eq 2) { return 2 }
-        if ($v -eq 1) { return 1 }
+        if ($v -eq 2) { return @{ Type = 2; Source = 'registry' } }
+        if ($v -eq 1) { return @{ Type = 1; Source = 'registry' } }
+    } catch {}
+    try {
+        $bm = Get-BcdOutputExact -BcdArgs @('/enum', '{bootmgr}', '/v')
+        if ($bm.Ok) {
+            if ($bm.Text -match '(?i)bootmgfw\.efi') { return @{ Type = 2; Source = 'bootmgr-path' } }
+            # \b 保证 "bootmgfw.efi" 不会被这里命中 —— UEFI 那种情况上面已经返回了
+            if ($bm.Text -match '(?i)\\bootmgr\b') { return @{ Type = 1; Source = 'bootmgr-path' } }
+        }
     } catch {}
     try {
         $p = Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':') -EA Stop
         $d = Get-Disk -Number $p.DiskNumber -EA Stop
-        if ($d.PartitionStyle -eq 'GPT') { return 2 }
-        if ($d.PartitionStyle -eq 'MBR') { return 1 }
+        if ($d.PartitionStyle -eq 'GPT') { return @{ Type = 2; Source = 'partition-style' } }
+        if ($d.PartitionStyle -eq 'MBR') { return @{ Type = 1; Source = 'partition-style' } }
     } catch {}
-    return 0
+    return @{ Type = 0; Source = 'unknown' }
+}
+
+# 保留这个薄封装：日志页脚、诊断导出这些只读调用点不用关心来源。
+function Get-FirmwareType {
+    return (Get-FirmwareInfo).Type
 }
 
 function Format-Size([double]$bytes) {
@@ -1621,9 +1611,25 @@ function Install-BootEntry {
 
     # [v1.35] 固件分支：UEFI 用 winload.efi，Legacy BIOS 用 winload.exe。
     # v1.34 及以前这里是一道死闸（非 UEFI 直接 return 失败），BIOS 机器装到最后一步必然报错。
-    $fwType = Get-FirmwareType
+    $fwInfo = Get-FirmwareInfo
+    $fwType = $fwInfo.Type
     if ($fwType -ne 1 -and $fwType -ne 2) {
         $r.Error = ('判断不出本机固件类型（' + $fwType + '），无法决定用哪个启动加载器。日志：' + $Script:LogFile)
+        return $r
+    }
+    if ($fwInfo.Source -eq 'partition-style') {
+        # 【v1.36】不接受「猜」。分区表和固件只是相关，猜错就装出一块起不来的盘。
+        $r.Error = (@(
+            '固件类型只能靠系统盘的分区表去猜（注册表里没有 PEFirmwareType，bcdedit 也读不到引导管理器路径）。',
+            '',
+            '这里不接受猜：选错哪一条，装出来的虚拟磁盘这台机器都起不来。',
+            '',
+            '请用管理员命令行执行  bcdedit /enum {bootmgr}  看 path 那一行：',
+            '  · \EFI\Microsoft\Boot\bootmgfw.efi  → UEFI',
+            '  · \bootmgr                          → Legacy BIOS',
+            '',
+            ('日志：' + $Script:LogFile)
+        ) -join "`n")
         return $r
     }
     $isUefi = ($fwType -eq 2)
@@ -1655,8 +1661,26 @@ function Install-BootEntry {
         $r.Backup = $backup
         Write-Log ("BCD 已备份（{0}，{1} 字节）: {2}" -f $bk.Mode, $bk.Size, $backup)
     } else {
-        Write-Log ("BCD 备份失败，仍然继续（只新增条目 + 改菜单超时，可用 bcdedit 撤回）: {0}" -f $bk.Error) 'WARN'
+        # 【v1.36】没有备份就停下，不再硬着头皮往下改。
+        #
+        # v1.35 及以前这里只写一行 WARN 就继续去增删启动项。而下一步就是 bcdedit 写入：
+        # 没有备份 = 改坏了没有退路，卸载器那条「用安装时的备份还原」也没有东西可导。
+        # 此时一个字都还没改，停下来的代价是零。
         $r.Backup = ''
+        $r.Error = (@(
+            '没能备份现有的 BCD，所以安装停在了改 BCD 之前 —— 引导配置一个字都没动。',
+            '',
+            ('原因：' + $bk.Error),
+            '',
+            '没有可回退的副本就不该去改启动项。',
+            '常见原因：杀毒软件拦了 bcdedit /export，或者日志目录不可写：',
+            ('    ' + $backupDir),
+            '',
+            '把杀毒软件临时关掉再装一次即可。已经建好的虚拟磁盘会保留，不会白费。',
+            '',
+            ('日志：' + $Script:LogFile)
+        ) -join "`n")
+        return $r
     }
 
     # 重复运行时先删掉上次的条目
@@ -1769,9 +1793,7 @@ function Install-BootEntry {
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         # [审计 P1-4] 不要依赖字段名：bcdedit 在德语系统上写 "Gerät"、日语写 "デバイス"、中文写 "设备"。
         # 字段名对不上会被当成「路径写错了」，其实写对了。带 vhd= 的只有 device 那一行。
-        $dm = [regex]::Match($chk.Raw, '(?im)^[^\r\n]*?(vhd=\[[^\r\n]+)')
-        $backFull = ''
-        if ($dm.Success) { $backFull = Get-FullPathFromBcdDevice $dm.Groups[1].Value.Trim() }
+        $backFull = Get-FullPathFromBcdDevice (Get-BcdDeviceFromOutput -Text $chk.Raw)
         # 路径里的中文被打成 "?" 只是控制台显示不出来，BCD 里存的是对的
         if (Test-BcdTextSame $wantFull $backFull) {
             if ($backFull -ne $wantFull) {
@@ -1779,13 +1801,26 @@ function Install-BootEntry {
             }
             break
         }
-        # 还是不一样：直接问 BCD 存储本身，绕开控制台
-        $stored = Test-BcdStoresPath $wantFull
-        if ($stored -eq $true) {
-            # [v1.32] 这是整库搜索（启发式），不是定位到本条目的 device 元素：
-            # 旧的启动项若也指向同一文件，同样会返回 true。
-            Write-Log '控制台把回读显示弄花了，且路径在导出的 BCD 存储里能找到（整库启发式，不精确到本条目）' 'WARN'
-            break
+        # 【v1.36】还是不一样：把控制台代码页强制成系统 ANSI 代码页，把这一条重读一遍，
+        # 中文路径会原样回来，不再是 "?"。
+        #
+        # 这一步替掉的是 v1.32 那个「整库导出、在里面搜这段路径」的兜底。那个判据不针对本条：
+        # 旧条目只要指向同一个文件（甚至只是 hive 里没压实的残留字节）就会命中，于是真写错了
+        # 也可能报「安装成功」，重启时 0xc000000f。
+        $ex = Get-BcdOutputExact -BcdArgs @('/enum', $guid, '/v')
+        if ($ex.Ok) {
+            $exFull = Get-FullPathFromBcdDevice (Get-BcdDeviceFromOutput -Text $ex.Text)
+            if (Test-BcdTextSame $wantFull $exFull) {
+                Write-Log ("按代码页 {0} 重读：{1} —— 一致" -f $ex.CodePage, $exFull)
+                break
+            }
+            if ($exFull) {
+                $backFull = $exFull
+            } else {
+                Write-Log ("按代码页 {0} 重读时这一条里根本没有 vhd= 行 —— 存储里确实存的是别的" -f $ex.CodePage) 'WARN'
+            }
+        } else {
+            Write-Log '没法用精确代码页重读这一条（bcdedit 没跑起来），只能拿控制台回显当依据' 'WARN'
         }
         Write-Log ("设备路径读回不一致（第 {0} 次）：期望 {1}，实际 {2}" -f $attempt, $wantFull, $backFull) 'WARN'
         if ($attempt -ge 2) {
@@ -1905,13 +1940,26 @@ function Invoke-Install {
         # （BIOS 的 bootmgr 读不了 GPT，那块盘再也救不回来，只能删了重装）。
         #
         # 现在两条都做：分区表在「分区」段按 $vhdStyle 建，加载器在 Install-BootEntry 里选。
-        $fwPre = Get-FirmwareType
+        $fwInfo = Get-FirmwareInfo
+        $fwPre = $fwInfo.Type
         if ($fwPre -ne 1 -and $fwPre -ne 2) {
             throw ('判断不出这台机器是 UEFI 还是 Legacy BIOS（固件类型返回值 ' + $fwPre + '）。' + "`n`n" +
                    '请用管理员命令行执行  bcdedit /enum {bootmgr}  看一下输出：' + "`n" +
                    '  · 有 path  \EFI\Microsoft\Boot\bootmgfw.efi  → UEFI' + "`n" +
                    '  · 没有 path 行、只有 device / description  → Legacy BIOS' + "`n`n" +
                    '把输出反馈给开发者。')
+        }
+        if ($fwInfo.Source -eq 'partition-style') {
+            throw (@(
+                '固件类型只能靠系统盘的分区表去猜，所以这次安装什么都没建就停下了。',
+                '选错哪一条，装出来的虚拟磁盘这台机器都起不来。',
+                '',
+                '请用管理员命令行执行  bcdedit /enum {bootmgr}  看 path 那一行：',
+                '  · \EFI\Microsoft\Boot\bootmgfw.efi  → UEFI',
+                '  · \bootmgr                          → Legacy BIOS',
+                '',
+                ('日志：' + $Script:LogFile)
+            ) -join "`n")
         }
         $vhdStyle = if ($fwPre -eq 1) { 'MBR' } else { 'GPT' }
         Write-Log ("固件类型: {0}，虚拟磁盘按 {1} 建" -f $(if ($fwPre -eq 2) { 'UEFI' } else { 'Legacy BIOS' }), $vhdStyle)
@@ -2131,6 +2179,26 @@ function Invoke-Install {
         } catch {
             throw "在虚拟磁盘上创建分区失败：$($_.Exception.Message)"
         }
+
+        # 【v1.36】把分区类型读回来，不再信「调用没报错」。
+        # 上面退回的那条路（不带 -MbrType 的 New-Partition）可能建出 0x00「未使用」的 MBR 分区项，
+        # 任何引导程序都不会从它启动 —— 而 v1.35 会照常跑完 DISM、写完启动项，
+        # 交出一块注定起不来的盘。
+        if ($vhdStyle -eq 'MBR') {
+            $mb = $null
+            try { $mb = Get-Partition -DiskNumber $diskNum -PartitionNumber $newPart.PartitionNumber -EA Stop } catch {}
+            if (-not $mb) {
+                throw '无法读回新建的 MBR 分区，分区类型未知，不再继续。'
+            }
+            $mbType = [int]$mb.MbrType
+            if ($mbType -ne 7) {
+                $mbWhy = ('新分区的 MBR 类型是 0x{0:X2}，不是 0x07（IFS/NTFS）。' -f $mbType)
+                throw ($mbWhy + "`n`n" +
+                       'Legacy BIOS 的引导程序不会启动类型 0x00 的分区，装下去也是一块起不来的盘。' + "`n" +
+                       '此时镜像还没展开，磁盘里什么都没写。')
+            }
+            Write-Log ('MBR 分区类型读回：0x{0:X2}（IFS）—— 正常' -f $mbType)
+        }
         try {
             Format-Volume -Partition $newPart -FileSystem NTFS -NewFileSystemLabel 'NewSystem' `
                           -Confirm:$false -Force -EA Stop | Out-Null
@@ -2142,13 +2210,19 @@ function Invoke-Install {
         # [v1.35] MBR 必须标 active。
         # BIOS 的引导链是 bootmgr →「活动分区」的 VBR → 系统。虚拟盘只有一个分区时
         # 标 active 没有任何副作用，但不标，有的机器直接报「找不到操作系统」。
+        #
+        # 【v1.36】标不上就当场停下，不再带病跑完整个安装。v1.35 及以前只写一行 WARN：
+        # 接着花十几分钟 DISM、再写启动项，最后交出一块注定起不来的盘。现在停下来的代价是十秒，
+        # 而且此时镜像还没展开，什么都不用清理。diskpart 的返回码也检查了（以前只写进日志）。
         if ($vhdStyle -eq 'MBR') {
             $actOk = $false
+            $actWhy = ''
             try {
                 Set-Partition -DiskNumber $diskNum -PartitionNumber $newPart.PartitionNumber -IsActive $true -EA Stop
                 $actOk = $true
             } catch {
-                Write-Log ("Set-Partition -IsActive 失败，改用 diskpart active: " + $_.Exception.Message) 'WARN'
+                $actWhy = $_.Exception.Message
+                Write-Log ("Set-Partition -IsActive 失败，改用 diskpart active: " + $actWhy) 'WARN'
             }
             if (-not $actOk) {
                 $dpa = Invoke-Diskpart -Tag 'active' -Lines @(
@@ -2158,11 +2232,37 @@ function Invoke-Install {
                     'exit'
                 )
                 Write-Log "diskpart active: $($dpa.Text)"
+                if ($dpa.Ok) { $actOk = $true } else { $actWhy = 'diskpart active 失败: ' + $dpa.Text }
             }
+            # 读回标志位确认。IsActive 读成 null 说明这个 Windows 版本不提供这个属性，
+            # 那就只有「两个命令都失败」才算失败，不能因为读不到就判死。
+            $actConfirmed = $null
             $actPart = @(Get-Partition -DiskNumber $diskNum -EA SilentlyContinue) | Where-Object { $_.PartitionNumber -eq $newPart.PartitionNumber } | Select-Object -First 1
-            if ($actPart -and ($null -ne $actPart.IsActive)) {
-                if ([bool]$actPart.IsActive) { Write-Log 'MBR 分区已标为 active ✓' }
-                else { Write-Log '分区没能标成 active，BIOS 下开机可能提示找不到操作系统' 'WARN' }
+            if ($actPart -and ($null -ne $actPart.IsActive)) { $actConfirmed = [bool]$actPart.IsActive }
+            if ($actConfirmed -eq $false -or (($null -eq $actConfirmed) -and (-not $actOk))) {
+                throw (@(
+                    'MBR 分区没能标成活动分区，安装已中止，虚拟磁盘里还没有展开镜像。',
+                    '',
+                    '为什么要停：Legacy BIOS 下引导管理器只认「活动分区」。没有这个标志，',
+                    '后面装得再完美，开机也是一句「找不到操作系统」。',
+                    '',
+                    ('原因：' + $actWhy),
+                    '',
+                    '可以在管理员命令行手动试一下：',
+                    '    diskpart',
+                    ('    select disk ' + $diskNum),
+                    ('    select partition ' + $newPart.PartitionNumber),
+                    '    active',
+                    '',
+                    '如果这样也失败，可能是磁盘只读或卷还在占用：重启后立刻再跑一次安装。',
+                    '',
+                    ('日志：' + $Script:LogFile)
+                ) -join "`n")
+            }
+            if ($actConfirmed -eq $true) {
+                Write-Log 'MBR 分区已标为 active（读回标志位确认）'
+            } else {
+                Write-Log 'MBR 分区已标为 active（命令报成功；这个 Windows 版本不提供标志位读回）' 'WARN'
             }
         }
 

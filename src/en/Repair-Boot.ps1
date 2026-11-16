@@ -69,7 +69,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Script:Version = '1.35'
+$Script:Version = '1.36'
 $Script:TempDir = [System.IO.Path]::GetTempPath()
 if (-not $Script:TempDir) { $Script:TempDir = 'C:\Windows\Temp\' }
 $Script:LogDate = (Get-Date).ToString('yyyyMMdd')
@@ -165,23 +165,9 @@ function Get-AnsiEncoding {
         return [System.Text.Encoding]::GetEncoding(936)
     }
 }
-
-
-# bcdedit prints through the console code page, so a character the page cannot carry comes
-# back as "?". The English launcher runs "chcp 437", which turned every Chinese character in
-# a path into "?" and made a correct BCD write look like a wrong path.
-function Test-BcdTextSame {
-    param([string]$Want, [string]$Got)
-    if ($null -eq $Got) { return $false }
-    if ($Got -eq $Want) { return $true }
-    if ($Got.Length -ne $Want.Length) { return $false }
-    for ($i = 0; $i -lt $Want.Length; $i++) {
-        if ($Got[$i] -eq $Want[$i]) { continue }
-        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
-        return $false
-    }
-    return $true
-}
+# [v1.36] Test-BcdTextSame moved to a shared module: four scripts carried their own copy of
+# the same comparison, so every fix had to be applied four times (and the copies could drift).
+. "$PSScriptRoot\..\shared\en\BcdVerify.ps1"
 
 # Call diskpart. $Lines is the command array; returns @{ Ok; Text; Path; Error }
 function Invoke-Diskpart {
@@ -211,24 +197,46 @@ function Invoke-Diskpart {
     $clean = ($txt -replace '\s+', ' ').Trim()
     return @{ Ok = (-not $bad); Text = $clean; Path = $f; Error = $(if ($bad) { $clean } else { '' }) }
 }
-
-function Get-FirmwareType {
+# [v1.36] Firmware detection now reports WHERE the answer came from.
+#
+# Up to v1.35 the third layer guessed from the system disk's partition style. That is a
+# correlation, not a fact: a UEFI machine can start Windows from an MBR disk that carries an
+# ESP, and a BIOS machine can hold a GPT data disk. Guessing wrong picks the wrong parameter
+# set (GPT + winload.efi vs MBR + winload.exe) and builds a disk that cannot boot.
+#
+# The answer is now read from the boot manager itself: "bcdedit /enum {bootmgr} /v" prints
+# path \EFI\Microsoft\Boot\bootmgfw.efi under UEFI and path \bootmgr under BIOS. The partition
+# style is still consulted, but only as a last resort, and the caller refuses to act on it.
+function Get-FirmwareInfo {
     try {
-        if ($env:firmware_type -eq 'UEFI') { return 2 }
-        if ($env:firmware_type -eq 'Legacy') { return 1 }
+        if ($env:firmware_type -eq 'UEFI') { return @{ Type = 2; Source = 'env' } }
+        if ($env:firmware_type -eq 'Legacy') { return @{ Type = 1; Source = 'env' } }
     } catch {}
     try {
         $v = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control' -Name PEFirmwareType -EA Stop).PEFirmwareType
-        if ($v -eq 2) { return 2 }
-        if ($v -eq 1) { return 1 }
+        if ($v -eq 2) { return @{ Type = 2; Source = 'registry' } }
+        if ($v -eq 1) { return @{ Type = 1; Source = 'registry' } }
+    } catch {}
+    try {
+        $bm = Get-BcdOutputExact -BcdArgs @('/enum', '{bootmgr}', '/v')
+        if ($bm.Ok) {
+            if ($bm.Text -match '(?i)bootmgfw\.efi') { return @{ Type = 2; Source = 'bootmgr-path' } }
+            # \b keeps "bootmgfw.efi" from matching here - the UEFI case is already returned above
+            if ($bm.Text -match '(?i)\\bootmgr\b') { return @{ Type = 1; Source = 'bootmgr-path' } }
+        }
     } catch {}
     try {
         $p = Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':') -EA Stop
         $d = Get-Disk -Number $p.DiskNumber -EA Stop
-        if ($d.PartitionStyle -eq 'GPT') { return 2 }
-        if ($d.PartitionStyle -eq 'MBR') { return 1 }
+        if ($d.PartitionStyle -eq 'GPT') { return @{ Type = 2; Source = 'partition-style' } }
+        if ($d.PartitionStyle -eq 'MBR') { return @{ Type = 1; Source = 'partition-style' } }
     } catch {}
-    return 0
+    return @{ Type = 0; Source = 'unknown' }
+}
+
+# Kept so read-only call sites do not care about the source.
+function Get-FirmwareType {
+    return (Get-FirmwareInfo).Type
 }
 
 # ============================================================
@@ -909,10 +917,28 @@ try {
     # [v1.35] Firmware branch: UEFI uses winload.efi, Legacy BIOS uses winload.exe.
     # Up to v1.34 non-UEFI machines were rejected outright, so a BIOS machine could not even
     # "add the missing boot entry" - it just saw "the system files are already written" with no menu.
-    $fw = Get-FirmwareType
+    $fwInfo = Get-FirmwareInfo
+    $fw = $fwInfo.Type
     if ($fw -ne 1 -and $fw -ne 2) {
         throw ('Cannot determine the firmware type (returned ' + $fw + '). Run bcdedit /enum {bootmgr} in an admin console: ' +
                'a path line \EFI\Microsoft\Boot\bootmgfw.efi means UEFI, no path line means Legacy BIOS. Report the result.')
+    }
+    if ($fwInfo.Source -eq 'partition-style') {
+        # [v1.36] Refuse to guess: adding an entry with the wrong loader produces a menu item
+        # that cannot boot, which is exactly the state the user is trying to get out of.
+        throw (@(
+            'The firmware type could only be guessed from the system disk partition table.',
+            '(PEFirmwareType is missing and bcdedit could not report the boot manager path.)',
+            '',
+            'Repairing on a guess would add a boot entry with the wrong loader (winload.efi vs',
+            'winload.exe), so nothing was changed.',
+            '',
+            'Run  bcdedit /enum {bootmgr}  in an administrator console and read the path line:',
+            '  - \EFI\Microsoft\Boot\bootmgfw.efi  -> UEFI',
+            '  - \bootmgr                          -> Legacy BIOS',
+            '',
+            ('Log: ' + $Script:LogFile)
+        ) -join "`n")
     }
     $isUefi = ($fw -eq 2)
     $loaderFile = if ($isUefi) { 'winload.efi' } else { 'winload.exe' }
@@ -972,7 +998,41 @@ try {
                'It will create an MBR partition table and the boot menu will work after a restart.')
     }
     if ($isUefi -and $vhdStyle -eq 'MBR') {
-        Write-Log 'Note: this machine is UEFI but the virtual disk is MBR. An MBR vhdx usually will not start under UEFI; consider reinstalling with the new installer.' 'WARN'
+        # [v1.36] This used to be a WARN, and the code then went on to write a winload.efi
+        # entry. The user repaired, rebooted, still got 0xc000000f, while the log said the
+        # repair finished. Same rule as the Legacy+GPT case above: do not write a boot entry
+        # for a combination that cannot boot.
+        throw ('This virtual disk was built for Legacy BIOS (MBR partition table) and this machine boots with UEFI - ' + "`n" +
+               'UEFI firmware starts through the GPT partition table, so an MBR disk will not start.' + "`n`n" +
+               'The system files inside are fine; only the partition table format does not match this firmware:' + "`n" +
+               ('  virtual disk: ' + $VhdPath) + "`n`n" +
+               'Reinstall with the new installer: delete that file and run it again. It will create a GPT' + "`n" +
+               'partition table, and the boot menu will work after a restart.')
+    }
+
+    # [v1.36] A Legacy BIOS boot loader only hands over to a primary partition flagged active.
+    # Without the flag the disk is readable, the entry is correct, and the boot still dies with
+    # "operating system not found" or a blinking cursor. The installer sets this since v1.35;
+    # a disk written by an older version, or repartitioned by hand, may be missing it.
+    if (-not $isUefi -and $vhdStyle -eq 'MBR') {
+        try {
+            $osPart = Get-Partition -DiskNumber $diskNum -EA Stop |
+                      Sort-Object PartitionNumber | Select-Object -First 1
+            if (-not $osPart) { throw 'no partition was found on the virtual disk' }
+            if ($osPart.IsActive) {
+                Write-Log 'The MBR partition is marked active - a Legacy BIOS loader can start it.'
+            } else {
+                Write-Log 'The MBR partition is NOT marked active - a Legacy BIOS loader would refuse to start it. Setting it now.' 'WARN'
+                Set-Partition -DiskNumber $diskNum -PartitionNumber $osPart.PartitionNumber -IsActive $true -EA Stop
+                $recheck = Get-Partition -DiskNumber $diskNum -PartitionNumber $osPart.PartitionNumber -EA Stop
+                if (-not $recheck.IsActive) { throw 'the flag did not stick (read back: still not active)' }
+                Write-Log 'Partition marked active, read-back confirms it.'
+            }
+        } catch {
+            throw ('Could not make sure the MBR partition is marked active: ' + $_.Exception.Message + "`n`n" +
+                   'A Legacy BIOS machine will not boot this disk while the flag is missing.' + "`n" +
+                   'Open Disk Management, right-click the partition, "Mark Partition as Active", then run this tool again.')
+        }
     }
 
     # [v1.32 final gate] Mount-Vhd may have fallen back to "unique file name" matching, which can

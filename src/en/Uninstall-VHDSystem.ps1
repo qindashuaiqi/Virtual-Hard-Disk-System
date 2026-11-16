@@ -6,7 +6,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '1.35'
+$Script:Version = '1.36'
 $Script:ProductName = 'Virtual Hard Disk System'
 
 function Test-Admin {
@@ -75,6 +75,11 @@ function Get-StateDisplayName {
 }
 # <<< COMMON:Get-StateDisplayName
 
+# [v1.36] Shared BCD helpers (Test-BcdTextSame / Get-BcdDeviceFromOutput / Get-BcdOutputExact).
+# They used to be copied into four scripts; the uninstaller needs the same comparison as the
+# installer, so it uses the same module instead of a slightly different local version.
+. "$PSScriptRoot\..\shared\en\BcdVerify.ps1"
+
 # Find the installed virtual hard disk systems.
 #
 # Since v1.11 the user picks the name (WinVHD / GameSystem / WorkWin ... all fine),
@@ -94,12 +99,27 @@ function Find-InstalledVhds {
         $fi = Get-Item -LiteralPath $Path -EA SilentlyContinue
         if (-not $fi) { return }
         $desc = Get-StateDisplayName -VhdPath $Path
+        # [v1.36] Ownership = "the installer left a .boot.txt next to this file".
+        #
+        # Until v1.35 every .vhdx found on a fixed NTFS volume was listed as "an installed virtual
+        # system" and could be deleted after a single Yes/No box, with no state file and no boot
+        # entry needed. A backup copy, a Hyper-V/VirtualBox disk or a system built by another tool
+        # all look identical to that scan. The flag is computed here and drives three decisions
+        # below: how the entry is labelled, whether a typed confirmation is required, and whether
+        # the fuzzy boot-entry fallbacks may run at all.
+        #
+        # The installer writes that state file in every path it can reach: a provisional one before
+        # the boot-entry step (Install-To-VHD.ps1), a partial one when the step fails, the full one
+        # on success. Only "DISM died halfway and the vhdx was kept" leaves a bare file - and that
+        # one is what Clean-Install-Residue.bat exists for.
+        $owned = Test-Path -LiteralPath ([System.IO.Path]::ChangeExtension($Path, '.boot.txt'))
         $script:FoundVhds += [PSCustomObject]@{
             Path   = $Path
             SizeGB = [math]::Round($fi.Length / 1GB, 1)
             Letter = $Letter
             Desc   = $desc
             Name   = [System.IO.Path]::GetFileNameWithoutExtension($Path)
+            Owned  = [bool]$owned
         }
     }
     $script:FoundVhds = @()
@@ -243,6 +263,59 @@ function Show-Gui {
         [System.Windows.Forms.Application]::DoEvents()
     }
 
+    # [v1.36] Typed confirmation for a vhdx this toolkit did not create.
+    # A MessageBox cannot take input and Read-Host would sit behind the hidden console, so this
+    # is a small modal of its own. Returns $true only when the file name matches exactly.
+    function Read-TypedName {
+        param([string]$Expect, [string]$Path)
+
+        $f = New-Object System.Windows.Forms.Form
+        $f.Text = 'Confirm deletion of a disk this toolkit did not create'
+        $f.Size = New-Object System.Drawing.Size(560, 300)
+        $f.StartPosition = 'CenterScreen'
+        $f.FormBorderStyle = 'FixedDialog'
+        $f.MaximizeBox = $false
+        $f.MinimizeBox = $false
+        $f.TopMost = $true
+        $f.BackColor = [System.Drawing.Color]::FromArgb(255, 248, 244)
+
+        $l = New-Object System.Windows.Forms.Label
+        $l.Text = ("There is no .boot.txt next to this file, so this toolkit did not create it.`n" +
+                   "It may be a Hyper-V or WSL disk, a backup copy, or a system built by another tool.`n`n" +
+                   "$Path`n`n" +
+                   "Deleting it is permanent and nothing here can undo it.`n" +
+                   "Its boot entry will only be removed if one points at this exact path.`n`n" +
+                   "Type the file name to continue:`n$Expect")
+        $l.Location = New-Object System.Drawing.Point(16, 12)
+        $l.Size = New-Object System.Drawing.Size(512, 196)
+        $f.Controls.Add($l)
+
+        $tb = New-Object System.Windows.Forms.TextBox
+        $tb.Location = New-Object System.Drawing.Point(16, 212)
+        $tb.Size = New-Object System.Drawing.Size(512, 24)
+        $f.Controls.Add($tb)
+
+        $ok = New-Object System.Windows.Forms.Button
+        $ok.Text = 'Delete'
+        $ok.Location = New-Object System.Drawing.Point(336, 246)
+        $ok.Size = New-Object System.Drawing.Size(90, 30)
+        $ok.DialogResult = 'OK'
+        $f.Controls.Add($ok)
+
+        $no = New-Object System.Windows.Forms.Button
+        $no.Text = 'Cancel'
+        $no.Location = New-Object System.Drawing.Point(438, 246)
+        $no.Size = New-Object System.Drawing.Size(90, 30)
+        $no.DialogResult = 'Cancel'
+        $f.Controls.Add($no)
+
+        $f.AcceptButton = $ok
+        $f.CancelButton = $no
+        if ($f.ShowDialog() -ne 'OK') { return $false }
+        $typed = $tb.Text.Trim().Trim('"')
+        return ([string]::Equals($typed, $Expect, [System.StringComparison]::OrdinalIgnoreCase))
+    }
+
     # Split `bcdedit /enum ...` output into one block per boot entry.
     # Returns @{ Blocks; Raw; Parsed; Ok }; when Ok=$false the caller MUST abort the deletion.
     #
@@ -296,6 +369,7 @@ function Show-Gui {
             $label = $it.Desc
             if (-not $label) { $label = $it.Name }
             if (-not $label) { $label = [System.IO.Path]::GetFileNameWithoutExtension($it.Path) }
+            if (-not $it.Owned) { $label = $label + '  [not created by this toolkit]' }
             [void]$listBox.Items.Add("$label    $($it.SizeGB) GB used    $($it.Path)")
         }
         $listBox.SelectedIndex = 0
@@ -326,6 +400,19 @@ function Show-Gui {
             [System.Windows.Forms.MessageBoxIcon]::Warning,
             [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
         if ($r -ne 'Yes') { return }
+
+        # [v1.36] Second gate for a disk this toolkit did not create.
+        #
+        # The Yes/No box above is one click away from permanent data loss for a file that merely
+        # happens to be a .vhdx. Typing the file name makes that click deliberate; it also means
+        # nobody can delete a backup by reflex while clicking through the list.
+        if (-not $it.Owned) {
+            if (-not (Read-TypedName -Expect ([System.IO.Path]::GetFileName($it.Path)) -Path $it.Path)) {
+                Log "Cancelled: the file name was not typed in for a disk this toolkit did not create"
+                return
+            }
+            Log "Typed-name confirmation passed for a disk without a state file"
+        }
 
         $btnUninstall.Enabled = $false
         try {
@@ -391,36 +478,61 @@ function Show-Gui {
             # 0xc0000098 "The Boot Configuration Data file does not contain a valid OS entry".
             # Rule: reject logical aliases, reject a path mismatch, only delete entries that
             # provably belong to this vhdx.
+            # [v1.36] $stateRefused = "the record pointed at something we could not confirm".
+            # Read further down by the delete gate: if a boot entry might still point at this
+            # vhdx, the file must stay.
+            $stateRefused = $false
             if ($stateGuid) {
                 if ($stateGuid -match '^\{(?:current|default|bootmgr|fwbootmgr|memdiag|ramdiskoptions)\}$') {
                     Log "Refusing: the state file records the alias $stateGuid - deleting it would remove the running/default system"
                     $stateGuid = ''
+                    $stateRefused = $true
                 } elseif (-not $exactDev) {
                     Log "Cannot compute the target device path; skipping the record-based delete and falling back to the scan below"
                     $stateGuid = ''
+                    $stateRefused = $true
                 } else {
-                    $probe = (& bcdedit /enum "$stateGuid" /v 2>&1 | Out-String)
-                    $probeL = ($probe -replace '[^\x20-\x7E]', '?')
-                    $devL = ($exactDev -replace '[^\x20-\x7E]', '?')
-                    if ($probe -match '找不到|not found|无效|invalid') {
+                    # [v1.36] Read this single entry with the code page forced, then compare the
+                    # device VALUE character by character. The previous version masked every
+                    # non-ASCII character to "?" and substring-matched the whole block - the very
+                    # Q5 defect: D:\系统\游戏.vhdx and D:\备份\测试.vhdx mask to the same string.
+                    $probeEx = Get-BcdOutputExact -BcdArgs @('/enum', $stateGuid, '/v')
+                    $probe = if ($probeEx.Ok) { $probeEx.Text } else { (& bcdedit /enum "$stateGuid" /v 2>&1 | Out-String) }
+                    if ($probe -match '找不到|not found|无效|invalid|does not exist') {
                         Log "Entry $stateGuid from the record no longer exists, skipping"
                         $stateGuid = ''
-                    } elseif ($probeL -notmatch [regex]::Escape($devL)) {
-                        Log "Refusing: $stateGuid device is not $exactDev - it may point at the host system, not deleting"
-                        $stateGuid = ''
+                    } else {
+                        $probeDev = Get-BcdDeviceFromOutput -Text $probe
+                        if (-not $probeDev) {
+                            Log "Refusing: no device path could be read from $stateGuid - cannot prove it is this vhdx, not deleting"
+                            $stateGuid = ''
+                            $stateRefused = $true
+                        } elseif (-not (Test-BcdTextSame $exactDev $probeDev)) {
+                            Log "Refusing: $stateGuid device is [$probeDev], not [$exactDev] - it may point at the host system, not deleting"
+                            $stateGuid = ''
+                            $stateRefused = $true
+                        }
                     }
                 }
             }
             if ($stateGuid) {
-                $del = & bcdedit /delete "$stateGuid" /f 2>&1 | Out-String
-                $t = ($del -replace '\s+', ' ').Trim()
-                Log "Deleting $stateGuid from the record => $t"
-                if ($del -notmatch '找不到|not found|无效|invalid|拒绝|denied') { $removed++ }
+                $del = Remove-BcdEntry -Guid $stateGuid
+                Log "Deleting $stateGuid from the record => exit $($del.Code): $($del.Text)"
+                if ($del.Ok) { $removed++ } else { $stateRefused = $true }
             }
 
             Log "Looking for boot entries (VHD loader mentioning $fileName)"
 
-            $bcdOut = & bcdedit /enum osloader /v 2>&1 | Out-String
+            # [v1.36] Read the listing with the console code page forced to the system ANSI one, so a
+            # Chinese path arrives intact instead of as "?" or as doubled mojibake. The plain call
+            # stays as the fallback: if bcdedit cannot be re-read, nothing below changes behaviour.
+            $exOsl = Get-BcdOutputExact -BcdArgs @('/enum', 'osloader', '/v')
+            if ($exOsl.Ok -and ($exOsl.Text -match '(?im)^\s*(?:identifier|标识符)\s+\{')) {
+                $bcdOut = $exOsl.Text
+                Log "bcdedit output read with code page $($exOsl.CodePage) - non-ASCII paths preserved"
+            } else {
+                $bcdOut = & bcdedit /enum osloader /v 2>&1 | Out-String
+            }
             $split = Split-BcdEntries $bcdOut
             if (-not $split.Ok) {
                 # When the parse cannot be trusted, delete nothing. Deleting the wrong entry
@@ -434,29 +546,38 @@ function Show-Gui {
 
             # Note: -match refreshes $Matches, so the GUID must be captured before the second match
             $hit = New-Object System.Collections.ArrayList
+            # [v1.36] Declared here, not inside the fallback branch: the delete gate further down
+            # has to know whether ANY candidate was seen, even when that branch found none.
+            $sameLetter = New-Object System.Collections.ArrayList
+            $sameName = New-Object System.Collections.ArrayList
             if ($exactDev) {
                 foreach ($blk in $blocks) {
                     if ($blk -notmatch '(?:identifier|标识符)\s+(\{[0-9a-fA-F\-]+\})') { continue }
                     $g = $Matches[1]
-                    # [chcp 437] The readback may show "?" where the path has non-ASCII characters,
-                    # so mask both sides before the exact match; otherwise the entry is left behind.
-                    $looseBlk = ($blk -replace '[^\x20-\x7E]', '?')
-                    $looseDev = ($exactDev -replace '[^\x20-\x7E]', '?')
-                    if ($looseBlk -match [regex]::Escape($looseDev)) {
+                    # [v1.36] Compare the device VALUE of this block character by character, instead of
+                    # masking every non-ASCII character and substring-matching the whole block.
+                    # The old masking made two different Chinese folders with the same ASCII skeleton and
+                    # the same length (D:\系统\游戏.vhdx vs D:\备份\测试.vhdx) indistinguishable, and a
+                    # substring hit could be satisfied by any line in the block. Test-BcdTextSame keeps
+                    # exactly one tolerance: a "?" where the real character is non-ASCII.
+                    $devTxt = Get-BcdDeviceFromOutput -Text $blk
+                    if ($devTxt -and (Test-BcdTextSame $exactDev $devTxt)) {
                         [void]$hit.Add([PSCustomObject]@{ Guid = $g; Block = $blk })
                     }
                 }
             }
 
             $matchMode = 'exact path'
-            if ($hit.Count -eq 0) {
+            if (($hit.Count -eq 0) -and (-not $it.Owned)) {
+                # [v1.36] No state file: exact device-path matching is proof, the fuzzy fallbacks are not.
+                $matchMode = 'no state file (fuzzy matching skipped)'
+                Log "No .boot.txt next to this vhdx, so it was not created by this toolkit - only an exact device-path match may remove a boot entry."
+            } elseif ($hit.Count -eq 0) {
                 # Fallback for when the exact string does not match (e.g. an older version wrote vhd=[D:]\sub\NewSystemDisk.vhdx).
                 #
                 # The fallback must not grab everything either: with one install per drive the file names are identical,
                 # so look among entries with the same drive letter first and delete only those;
                 # only when that also fails (the letter changed, e.g. D: became F:) compare by full file name.
-                $sameLetter = New-Object System.Collections.ArrayList
-                $sameName = New-Object System.Collections.ArrayList
                 foreach ($blk in $blocks) {
                     # [bilingual] bcdedit output follows the system language:
                     #   English -> identifier / description, Chinese -> 标识符 / 描述
@@ -470,9 +591,19 @@ function Show-Gui {
                         [void]$sameLetter.Add([PSCustomObject]@{ Guid = $g; Block = $blk })
                     }
                 }
-                if ($sameLetter.Count -gt 0) {
+                # [v1.36] Only delete when exactly one entry qualifies.
+                # Until v1.35 every same-drive + same-name entry went into $hit and was deleted, so
+                # D:\A\Game.vhdx and D:\B\Game.vhdx took each other out: uninstalling one removed both
+                # boot entries. Two candidates means "cannot prove which one this is" - report and stop,
+                # the same rule the file-name-only branch has followed since v1.34.
+                if ($sameLetter.Count -eq 1) {
                     $matchMode = "same-drive fallback ($($vhdLetter):)"
-                    foreach ($x in $sameLetter) { [void]$hit.Add($x) }
+                    [void]$hit.Add($sameLetter[0])
+                } elseif ($sameLetter.Count -gt 1) {
+                    $matchMode = 'same-drive ambiguous (deletion disabled, reporting only)'
+                    Log "WARNING: $($sameLetter.Count) entries on $($vhdLetter): carry the file name ""$fileName"" - cannot prove which one belongs to this vhdx, so nothing was deleted."
+                    foreach ($x in $sameLetter) { Log "        candidate $($x.Guid)" }
+                    Log "      If you are certain, delete manually: bcdedit /delete {GUID} /f"
                 } else {
                     # [v1.34] A file-name-only match is too weak to delete on.
                     # Two drives each holding a NewSystemDisk.vhdx would take each other out.
@@ -491,11 +622,46 @@ function Show-Gui {
                 $desc = ''
                 if ($h.Block -match '(?:description|描述)\s+(.+?)\r?\n') { $desc = $Matches[1].Trim() }
                 Log "Found boot entry: $($h.Guid)  $desc"
-                $del = & bcdedit /delete "$($h.Guid)" /f 2>&1 | Out-String
-                Log "Delete: $(($del -replace '\s+', ' ').Trim())"
-                if ($del -notmatch '找不到|not found|无效|invalid|拒绝|denied') { $removed++ }
+                $del = Remove-BcdEntry -Guid $h.Guid
+                Log "Delete: exit $($del.Code): $($del.Text)"
+                if ($del.Ok) { $removed++ }
             }
             Log "Removed $removed boot entries in total"
+
+            # [v1.36] Do not delete a virtual disk while a boot entry may still point at it.
+            #
+            # Up to v1.35 the file was deleted unconditionally a few dozen lines below, even when
+            # the branch above had just decided "cannot prove which entry belongs to this vhdx,
+            # nothing was deleted". The vhdx disappeared, the menu entry stayed, and picking it
+            # died with 0xc000000f. Stopping here keeps the disk, the state file and the BCD as
+            # they are - the user can sort out the entry by hand and run this again.
+            # The decision itself lives in the shared module (Get-UninstallDeleteVerdict) so the
+            # unit test can feed it every combination - including "matched but could not delete",
+            # which v1.35 would have turned into a deleted file plus a dangling menu entry.
+            $candCount = $sameLetter.Count + $sameName.Count
+            $verdict = Get-UninstallDeleteVerdict -Removed $removed -HitCount $hit.Count `
+                                                  -CandidateCount $candCount -StateRefused $stateRefused
+            $abortReason = if ($verdict.Allow) { '' } else { $verdict.Reason }
+            if ($abortReason) {
+                Log "ABORT: $abortReason"
+                Log "Nothing was deleted: $($it.Path) and $statePath are untouched, and no boot entry was removed."
+                Log "Check 'bcdedit /enum osloader /v' by hand, remove the right entry with 'bcdedit /delete {GUID} /f', then run this tool again."
+                [System.Windows.Forms.MessageBox]::Show(
+                    "Stopped before deleting anything.`n`n$abortReason`n`n" +
+                    "The virtual disk is still there and the boot menu was not changed.`n`n" +
+                    "To finish by hand:`n" +
+                    "  1. bcdedit /enum osloader /v   (find the entry whose vhd= line is this file)`n" +
+                    "  2. bcdedit /delete {GUID} /f`n" +
+                    "  3. delete the .vhdx yourself, then run this tool again to tidy up leftovers",
+                    'Nothing was deleted',
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                Refresh-List
+                return
+            }
+            if ($removed -eq 0) {
+                Log "No boot entry references this vhdx - deleting the file will not leave a dangling menu entry"
+            }
 
             # [v1.34 safety gate] After deleting, prove the machine can still boot.
             #
@@ -513,16 +679,21 @@ function Show-Gui {
             $bmDefault = ''
             $selfCheckOk = $false
             try {
-                $afterRaw = (& bcdedit /enum osloader /v 2>&1 | Out-String)
+                # [v1.36] Same exact read as above: the self-check parses descriptions, which are
+                # non-ASCII on a Chinese system, and a mangled read made it skip its own repair step.
+                $exAfter = Get-BcdOutputExact -BcdArgs @('/enum', 'osloader', '/v')
+                $afterRaw = if ($exAfter.Ok) { $exAfter.Text } else { (& bcdedit /enum osloader /v 2>&1 | Out-String) }
                 $spAfter = Split-BcdEntries $afterRaw
                 if ($spAfter.Ok) {
                     $selfCheckOk = $true
                     foreach ($ab in $spAfter.Blocks) {
                         if ($ab -notmatch '(?:identifier|标识符)\s+(\{[0-9a-fA-F\-]+\})') { continue }
                         $g = $Matches[1]
-                        if ($ab -match '(?im)^\s*device\s+ramdisk=') { continue }
+                        # [v1.36] Label-independent: "device" / "设备" / "Gerät" all skipped the
+                        # old checks, which made this self-check see zero bootable systems.
+                        if ($ab -match '(?im)ramdisk=') { continue }
                         if ($ab -match '(?im)(?:description|描述)\s+.*(?:Recovery|恢复|内存诊断|Memory Diagnostic|Windows Boot Manager)') { continue }
-                        if ($ab -notmatch '(?im)(?:device|osdevice)\s+(?:partition=|vhd=)') { continue }
+                        if (-not (Test-BcdBlockIsLoader -Text $ab)) { continue }
                         if ($aliveGuids -notcontains $g) { [void]$aliveGuids.Add($g) }
                     }
                 } else {
@@ -548,6 +719,20 @@ function Show-Gui {
                 } else {
                     Log "CRITICAL: no bootable system is left in the store"
                     if ($bcdBackup -and (Test-Path -LiteralPath $bcdBackup)) {
+                        # [v1.36] /import replaces the WHOLE store, so everything added since the install
+                        # (other boot entries, later edits) is rolled back with it. Keep a copy of the
+                        # current store first: that makes this restore undoable and puts the state of the
+                        # machine into the log before the irreversible step runs.
+                        $stampNow = (Get-Date).ToString('yyyyMMdd-HHmmss')
+                        $preDir = [System.IO.Path]::GetDirectoryName($bcdBackup)
+                        if (-not $preDir) { $preDir = $env:TEMP }
+                        $preImport = Join-Path $preDir ("bcd-before-restore-$stampNow.bcd")
+                        try {
+                            $exp = & bcdedit /export "$preImport" 2>&1 | Out-String
+                            Log ("Current store saved before the restore: " + (($exp -replace '\s+', ' ').Trim()) + " -> $preImport")
+                        } catch {
+                            Log "Could not save the current store before the restore: $($_.Exception.Message)"
+                        }
                         Log "Restoring the BCD backup exported at install time: $bcdBackup"
                         $imp = & bcdedit /import "$bcdBackup" 2>&1 | Out-String
                         Log ("Restore result: " + (($imp -replace '\s+', ' ').Trim()))
@@ -666,8 +851,13 @@ function Show-Gui {
             if ($released -eq 0) { Log "No leftover ESP drive letters found" }
 
             Log "=== Uninstall complete ==="
+            $doneWhat = if ($removed -gt 0) {
+                "The virtual hard disk is deleted and $removed boot entr(ies) were removed."
+            } else {
+                "The virtual hard disk is deleted. No boot entry pointed at it, so there was nothing to remove."
+            }
             [System.Windows.Forms.MessageBox]::Show(
-                "Uninstall complete.`n`nThe virtual hard disk is deleted and the boot entry removed.`n`n""$itName"" will no longer appear in the boot menu.`n" +
+                "Uninstall complete.`n`n$doneWhat`n`n""$itName"" will no longer appear in the boot menu.`n" +
                 "(If one entry is still listed, it can be ignored, or reboot once and it cleans itself up.)",
                 'Done',
                 [System.Windows.Forms.MessageBoxButtons]::OK,

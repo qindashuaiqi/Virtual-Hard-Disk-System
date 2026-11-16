@@ -15,7 +15,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '1.35'
+$Script:Version = '1.36'
 $Script:LogFile = Join-Path $env:TEMP ("Fix-BootEntry-{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
 
 function Write-Log {
@@ -45,22 +45,9 @@ function Invoke-Bcd {
     $bad = ($txt -match '找不到|not found|无效|invalid|拒绝|denied|失败|failed|错误|error')
     return @{ Ok = (($code -eq 0) -and (-not $bad)); Code = $code; Text = $clean; Raw = $txt }
 }
-
-# bcdedit prints through the console code page, so a character the page cannot carry comes
-# back as "?". The English launcher runs "chcp 437", which turned every Chinese character in
-# a path into "?" and made a correct BCD write look like a wrong path.
-function Test-BcdTextSame {
-    param([string]$Want, [string]$Got)
-    if ($null -eq $Got) { return $false }
-    if ($Got -eq $Want) { return $true }
-    if ($Got.Length -ne $Want.Length) { return $false }
-    for ($i = 0; $i -lt $Want.Length; $i++) {
-        if ($Got[$i] -eq $Want[$i]) { continue }
-        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
-        return $false
-    }
-    return $true
-}
+# [v1.36] Test-BcdTextSame moved to a shared module: four scripts carried their own copy of
+# the same comparison, so every fix had to be applied four times (and the copies could drift).
+. "$PSScriptRoot\..\shared\en\BcdVerify.ps1"
 
 # Full path -> BCD vhd= syntax. The intermediate subfolder must be preserved:
 #   D:\VirtualDisks\maimai.vhdx  ->  vhd=[D:]\VirtualDisks\maimai.vhdx

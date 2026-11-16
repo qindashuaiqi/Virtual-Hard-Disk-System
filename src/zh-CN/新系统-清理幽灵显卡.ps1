@@ -22,7 +22,7 @@
 # ============================================================
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '1.35'
+$Script:Version = '1.36'
 try { $Host.UI.RawUI.WindowTitle = "新系统 显卡体检 v$($Script:Version) - connectsegabot" } catch {}
 
 # [v1.32] 共享模块。打包时由 src/build/inline_shared.py 内联本文件，

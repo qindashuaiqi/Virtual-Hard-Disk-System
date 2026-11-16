@@ -6,7 +6,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '1.35'
+$Script:Version = '1.36'
 $Script:ProductName = '虚拟硬盘系统'
 
 function Test-Admin {
@@ -74,6 +74,10 @@ function Get-StateDisplayName {
 }
 # <<< COMMON:Get-StateDisplayName
 
+# 【v1.36】共享的 BCD 工具函数（Test-BcdTextSame / Get-BcdDeviceFromOutput / Get-BcdOutputExact）。
+# 原来同样的比较逻辑在四个脚本里各有一份，卸载器和安装器必须用同一套判据。
+. "$PSScriptRoot\..\shared\zh-CN\BcdVerify.ps1"
+
 # 找出装好的虚拟硬盘系统。
 #
 # v1.11 起由用户自己取名（WinVHD / 游戏系统 / WorkWin ... 都行），
@@ -93,12 +97,25 @@ function Find-InstalledVhds {
         $fi = Get-Item -LiteralPath $Path -EA SilentlyContinue
         if (-not $fi) { return }
         $desc = Get-StateDisplayName -VhdPath $Path
+        # 【v1.36】「是不是本工具装的」= 这个 vhdx 旁边有没有 .boot.txt。
+        #
+        # v1.35 及以前，扫到的每一个 .vhdx 都被当成「装好的虚拟系统」列出来，
+        # 一个 Yes/No 就能删，既不要求状态文件也不要求 BCD 命中。
+        # 备份副本、Hyper-V 虚拟机的盘、别的工具装出来的系统，在这个扫描里长得一模一样。
+        # 这个标志下面决定三件事：列表里怎么标、要不要输入文件名二次确认、
+        # 以及那几个「模糊兜底」匹配到底能不能跑。
+        #
+        # 安装器只要走到得地方都会写这个状态文件：BCD 步骤之前写 provisional，
+        # 步骤失败写 partial，成功写完整版。只有「DISM 中途失败但 vhdx 被留下」是裸文件 ——
+        # 那种盘正是「清理安装残留」工具存在的理由。
+        $owned = Test-Path -LiteralPath ([System.IO.Path]::ChangeExtension($Path, '.boot.txt'))
         $script:FoundVhds += [PSCustomObject]@{
             Path   = $Path
             SizeGB = [math]::Round($fi.Length / 1GB, 1)
             Letter = $Letter
             Desc   = $desc
             Name   = [System.IO.Path]::GetFileNameWithoutExtension($Path)
+            Owned  = [bool]$owned
         }
     }
     $script:FoundVhds = @()
@@ -238,6 +255,59 @@ function Show-Gui {
         [System.Windows.Forms.Application]::DoEvents()
     }
 
+    # 【v1.36】对「不是本工具装的」盘，要求输入文件名才能删。
+    # MessageBox 收不了输入，Read-Host 又藏在隐藏的控制台后面，所以自己弹一个小窗。
+    # 只有文件名完全一致才返回 $true。
+    function Read-TypedName {
+        param([string]$Expect, [string]$Path)
+
+        $f = New-Object System.Windows.Forms.Form
+        $f.Text = '确认删除一个不是本工具创建的磁盘'
+        $f.Size = New-Object System.Drawing.Size(560, 300)
+        $f.StartPosition = 'CenterScreen'
+        $f.FormBorderStyle = 'FixedDialog'
+        $f.MaximizeBox = $false
+        $f.MinimizeBox = $false
+        $f.TopMost = $true
+        $f.BackColor = [System.Drawing.Color]::FromArgb(255, 248, 244)
+
+        $l = New-Object System.Windows.Forms.Label
+        $l.Text = ("这个文件旁边没有 .boot.txt，所以它不是本工具装的。`n" +
+                   "它可能是 Hyper-V / WSL 的虚拟盘、备份副本，或者别的工具装出来的系统。`n`n" +
+                   "$Path`n`n" +
+                   "删除是永久的，这个程序没有任何办法还原。`n" +
+                   "只有当某条启动项的路径与这个文件完全一致时，才会连带删除那条启动项。`n`n" +
+                   "要继续，请输入文件名：`n$Expect")
+        $l.Location = New-Object System.Drawing.Point(16, 12)
+        $l.Size = New-Object System.Drawing.Size(512, 196)
+        $f.Controls.Add($l)
+
+        $tb = New-Object System.Windows.Forms.TextBox
+        $tb.Location = New-Object System.Drawing.Point(16, 212)
+        $tb.Size = New-Object System.Drawing.Size(512, 24)
+        $f.Controls.Add($tb)
+
+        $ok = New-Object System.Windows.Forms.Button
+        $ok.Text = '删除'
+        $ok.Location = New-Object System.Drawing.Point(336, 246)
+        $ok.Size = New-Object System.Drawing.Size(90, 30)
+        $ok.DialogResult = 'OK'
+        $f.Controls.Add($ok)
+
+        $no = New-Object System.Windows.Forms.Button
+        $no.Text = '取消'
+        $no.Location = New-Object System.Drawing.Point(438, 246)
+        $no.Size = New-Object System.Drawing.Size(90, 30)
+        $no.DialogResult = 'Cancel'
+        $f.Controls.Add($no)
+
+        $f.AcceptButton = $ok
+        $f.CancelButton = $no
+        if ($f.ShowDialog() -ne 'OK') { return $false }
+        $typed = $tb.Text.Trim().Trim('"')
+        return ([string]::Equals($typed, $Expect, [System.StringComparison]::OrdinalIgnoreCase))
+    }
+
     # 把 `bcdedit /enum ...` 的输出按「一个启动项一块」切开。
     # 返回 @{ Blocks; Raw; Parsed; Ok }，Ok=$false 时调用方必须放弃删除。
     #
@@ -289,6 +359,7 @@ function Show-Gui {
             $label = $it.Desc
             if (-not $label) { $label = $it.Name }
             if (-not $label) { $label = [System.IO.Path]::GetFileNameWithoutExtension($it.Path) }
+            if (-not $it.Owned) { $label = $label + '  【不是本工具装的】' }
             [void]$listBox.Items.Add("$label    占用 $($it.SizeGB) GB    $($it.Path)")
         }
         $listBox.SelectedIndex = 0
@@ -319,6 +390,19 @@ function Show-Gui {
             [System.Windows.Forms.MessageBoxIcon]::Warning,
             [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
         if ($r -ne 'Yes') { return }
+
+        # 【v1.36】不是本工具装的盘，再加一道闸。
+        #
+        # 上面那个 Yes/No 对一个「碰巧是 .vhdx」的文件来说只差一次点击就是永久数据丢失：
+        # 备份副本、别的虚拟机软件的盘、别的工具装的系统，都可能被一路点下去删掉。
+        # 让用户把文件名敲一遍，是最便宜的「这一步是故意的」证明。
+        if (-not $it.Owned) {
+            if (-not (Read-TypedName -Expect ([System.IO.Path]::GetFileName($it.Path)) -Path $it.Path)) {
+                Log "已取消：这个盘不是本工具装的，文件名没输对"
+                return
+            }
+            Log "没有状态文件的盘：输入文件名确认通过"
+        }
 
         $btnUninstall.Enabled = $false
         try {
@@ -380,36 +464,58 @@ function Show-Gui {
             # 旧状态文件残留、中途换过条目——删掉的就是别人的启动项；连原系统的
             # 条目一起没了，重启直接 0xc0000098「BCD 不包含有效的操作系统信息」。
             # 原则：别名一律拒绝，路径对不上一律拒绝，只删「确实是这个 vhdx」的条目。
+            # 【v1.36】$stateRefused = 「记录指向的东西没能确认」。
+            # 下面「删文件前的闸门」会读它：只要还可能有条目指向这个 vhdx，文件就必须留下。
+            $stateRefused = $false
             if ($stateGuid) {
                 if ($stateGuid -match '^\{(?:current|default|bootmgr|fwbootmgr|memdiag|ramdiskoptions)\}$') {
                     Log "拒绝：状态文件记录的是逻辑别名 $stateGuid，删它会删掉当前/默认系统"
                     $stateGuid = ''
+                    $stateRefused = $true
                 } elseif (-not $exactDev) {
                     Log "无法算出目标设备路径，跳过按记录删除，改走下面的扫描匹配"
                     $stateGuid = ''
+                    $stateRefused = $true
                 } else {
-                    $probe = (& bcdedit /enum "$stateGuid" /v 2>&1 | Out-String)
-                    $probeL = ($probe -replace '[^\x20-\x7E]', '?')
-                    $devL = ($exactDev -replace '[^\x20-\x7E]', '?')
-                    if ($probe -match '找不到|not found|无效|invalid') {
+                    # 【v1.36】按代码页精确读出这一条，再逐字符比 device 值。
+                    # 老写法把非 ASCII 全替换成 "?" 后整块子串匹配，正是 Q5 那个缺陷：
+                    # D:\系统\游戏.vhdx 和 D:\备份\测试.vhdx 掩码后是同一个字符串。
+                    $probeEx = Get-BcdOutputExact -BcdArgs @('/enum', $stateGuid, '/v')
+                    $probe = if ($probeEx.Ok) { $probeEx.Text } else { (& bcdedit /enum "$stateGuid" /v 2>&1 | Out-String) }
+                    if ($probe -match '找不到|not found|无效|invalid|does not exist') {
                         Log "记录里的条目 $stateGuid 已不存在，跳过"
                         $stateGuid = ''
-                    } elseif ($probeL -notmatch [regex]::Escape($devL)) {
-                        Log "拒绝：$stateGuid 的 device 不是 $exactDev，可能指向原系统，不删"
-                        $stateGuid = ''
+                    } else {
+                        $probeDev = Get-BcdDeviceFromOutput -Text $probe
+                        if (-not $probeDev) {
+                            Log "拒绝：从 $stateGuid 里读不出 device，无法证明它就是这块盘，不删"
+                            $stateGuid = ''
+                            $stateRefused = $true
+                        } elseif (-not (Test-BcdTextSame $exactDev $probeDev)) {
+                            Log "拒绝：$stateGuid 的 device 是 [$probeDev]，不是 [$exactDev]，可能指向原系统，不删"
+                            $stateGuid = ''
+                            $stateRefused = $true
+                        }
                     }
                 }
             }
             if ($stateGuid) {
-                $del = & bcdedit /delete "$stateGuid" /f 2>&1 | Out-String
-                $t = ($del -replace '\s+', ' ').Trim()
-                Log "按记录删除 $stateGuid => $t"
-                if ($del -notmatch '找不到|not found|无效|invalid|拒绝|denied') { $removed++ }
+                $del = Remove-BcdEntry -Guid $stateGuid
+                Log "按记录删除 $stateGuid => 退出码 $($del.Code)：$($del.Text)"
+                if ($del.Ok) { $removed++ } else { $stateRefused = $true }
             }
 
             Log "查找启动项（含 $fileName 的 VHD 引导）"
 
-            $bcdOut = & bcdedit /enum osloader /v 2>&1 | Out-String
+            # 【v1.36】用系统 ANSI 代码页把这份列表读出来，中文路径原样返回，
+            # 不再是 "?" 或一个汉字变两个乱码字符。读不出来就退回原来的直接调用，行为不变。
+            $exOsl = Get-BcdOutputExact -BcdArgs @('/enum', 'osloader', '/v')
+            if ($exOsl.Ok -and ($exOsl.Text -match '(?im)^\s*(?:identifier|标识符)\s+\{')) {
+                $bcdOut = $exOsl.Text
+                Log "已按代码页 $($exOsl.CodePage) 读取 bcdedit 输出，非 ASCII 路径原样保留"
+            } else {
+                $bcdOut = & bcdedit /enum osloader /v 2>&1 | Out-String
+            }
             $split = Split-BcdEntries $bcdOut
             if (-not $split.Ok) {
                 # 解析不可靠时宁可什么都不删。删错的代价是把用户的原系统引导一起干掉。
@@ -422,29 +528,37 @@ function Show-Gui {
 
             # 注意：-match 会刷新 $Matches，所以 GUID 必须在第二次匹配之前先取出来
             $hit = New-Object System.Collections.ArrayList
+            # 【v1.36】在这里声明而不是在兜底分支里：下面的「删文件前的闸门」需要知道
+            # 有没有出现过候选，即使兜底分支一个都没找到。
+            $sameLetter = New-Object System.Collections.ArrayList
+            $sameName = New-Object System.Collections.ArrayList
             if ($exactDev) {
                 foreach ($blk in $blocks) {
                     if ($blk -notmatch '(?:identifier|标识符)\s+(\{[0-9a-fA-F\-]+\})') { continue }
                     $g = $Matches[1]
-                    # [chcp 437] 回读里路径的中文可能变成 "?"，两边都遮一下再比，
-                    # 否则条目匹配不上，卸载完菜单里会留一个孤儿项。
-                    $looseBlk = ($blk -replace '[^\x20-\x7E]', '?')
-                    $looseDev = ($exactDev -replace '[^\x20-\x7E]', '?')
-                    if ($looseBlk -match [regex]::Escape($looseDev)) {
+                    # 【v1.36】逐字符比较这个块里的 device 值，不再把非 ASCII 全替换成 "?"
+                    # 再做整块子串匹配。
+                    # 老写法把 D:\系统\游戏.vhdx 和 D:\备份\测试.vhdx 变成同一个 D:\??\??.vhdx
+                    # （ASCII 骨架和长度都一样就撞），而且整块子串命中还可能被块里任意一行满足。
+                    # Test-BcdTextSame 只保留一个容忍：真字符是非 ASCII 位置上的 "?"。
+                    $devTxt = Get-BcdDeviceFromOutput -Text $blk
+                    if ($devTxt -and (Test-BcdTextSame $exactDev $devTxt)) {
                         [void]$hit.Add([PSCustomObject]@{ Guid = $g; Block = $blk })
                     }
                 }
             }
 
             $matchMode = '精确路径'
-            if ($hit.Count -eq 0) {
+            if (($hit.Count -eq 0) -and (-not $it.Owned)) {
+                # 【v1.36】没有状态文件：只有「完整路径精确命中」算证据，模糊兜底一律不跑。
+                $matchMode = '无状态文件（已跳过模糊匹配）'
+                Log "这个 vhdx 旁边没有 .boot.txt，不是本工具装的：只允许「完整路径精确命中」的条目被删。"
+            } elseif ($hit.Count -eq 0) {
                 # 精确串对不上（比如老版本写成 vhd=[D:]\sub\NewSystemDisk.vhdx）时的兜底。
                 #
                 # 兜底也不能一把抓：两块盘各装一份时文件名完全一样，
                 # 所以先在「盘符相同」的条目里找，找到了就只删这些；
                 # 还找不到（盘符也变了，如 D: 被改成了 F:）才放开比全文件名。
-                $sameLetter = New-Object System.Collections.ArrayList
-                $sameName = New-Object System.Collections.ArrayList
                 foreach ($blk in $blocks) {
                     # 【中英双语】bcdedit 输出跟随系统语言：
                     #   英文 → identifier / description，中文 → 标识符 / 描述
@@ -458,9 +572,19 @@ function Show-Gui {
                         [void]$sameLetter.Add([PSCustomObject]@{ Guid = $g; Block = $blk })
                     }
                 }
-                if ($sameLetter.Count -gt 0) {
+                # 【v1.36】只有一个候选才删。
+                # v1.35 及以前把「同盘符 + 同名」的条目全塞进 $hit 逐个删：
+                # D:\A\Game.vhdx 和 D:\B\Game.vhdx 会互相带走，卸载一个删掉两条启动项。
+                # 命中两个以上就是「证不了是哪一个」，只报告不动手 ——
+                # 和 v1.34 起「仅文件名兜底」的处理保持一致。
+                if ($sameLetter.Count -eq 1) {
                     $matchMode = "同盘符兜底（$($vhdLetter):）"
-                    foreach ($x in $sameLetter) { [void]$hit.Add($x) }
+                    [void]$hit.Add($sameLetter[0])
+                } elseif ($sameLetter.Count -gt 1) {
+                    $matchMode = '同盘符多义（已禁用删除，仅提示）'
+                    Log "警告：$($vhdLetter): 上有 $($sameLetter.Count) 个条目都带文件名 ""$fileName""，无法确认哪一个是这个 vhdx，已跳过不删。"
+                    foreach ($x in $sameLetter) { Log "        候选 $($x.Guid)" }
+                    Log "      确认无误后可手动执行：bcdedit /delete {GUID} /f"
                 } else {
                     # 【v1.34】只按文件名匹配时，宁可不删。
                     # 两块盘各装一份同名 vhdx（默认都叫 NewSystemDisk.vhdx）时，
@@ -479,11 +603,43 @@ function Show-Gui {
                 $desc = ''
                 if ($h.Block -match '(?:description|描述)\s+(.+?)\r?\n') { $desc = $Matches[1].Trim() }
                 Log "发现启动项: $($h.Guid)  $desc"
-                $del = & bcdedit /delete "$($h.Guid)" /f 2>&1 | Out-String
-                Log "删除: $(($del -replace '\s+', ' ').Trim())"
-                if ($del -notmatch '找不到|not found|无效|invalid|拒绝|denied') { $removed++ }
+                $del = Remove-BcdEntry -Guid $h.Guid
+                Log "删除: 退出码 $($del.Code)：$($del.Text)"
+                if ($del.Ok) { $removed++ }
             }
             Log "共移除 $removed 个启动项"
+
+            # 【v1.36】只要还可能有启动项指向这块盘，就不能删文件。
+            #
+            # v1.35 及以前，无论上面是不是刚判过「证不了是哪一个，已跳过不删」，
+            # 下面都无条件删 vhdx：文件没了、菜单条目还在，选中就是 0xc000000f。
+            # 这里停下来，盘、状态文件、BCD 全都保持原样，用户手工理清条目后再跑一次即可。
+            # 判定本身放在共享模块里（Get-UninstallDeleteVerdict），这样单元测试能把每种组合都喂一遍
+            # —— 包括「匹配到但删不掉」，v1.35 会把它变成「文件删了、菜单残留」。
+            $candCount = $sameLetter.Count + $sameName.Count
+            $verdict = Get-UninstallDeleteVerdict -Removed $removed -HitCount $hit.Count `
+                                                  -CandidateCount $candCount -StateRefused $stateRefused
+            $abortReason = if ($verdict.Allow) { '' } else { $verdict.Reason }
+            if ($abortReason) {
+                Log "已中止：$abortReason"
+                Log "什么都没删：$($it.Path) 和 $statePath 都没动，启动项一个也没移除。"
+                Log "请手工看 'bcdedit /enum osloader /v'，确认后执行 'bcdedit /delete {GUID} /f'，再跑一次本工具。"
+                [System.Windows.Forms.MessageBox]::Show(
+                    "已在删除任何东西之前停下。`n`n$abortReason`n`n" +
+                    "虚拟硬盘还在，开机菜单没有改动。`n`n" +
+                    "手工收尾的步骤：`n" +
+                    "  1. bcdedit /enum osloader /v   （找到 vhd= 那一行是这块盘文件的条目）`n" +
+                    "  2. bcdedit /delete {GUID} /f`n" +
+                    "  3. 自己删掉那个 .vhdx，再跑一次本工具清理残留",
+                    '什么都没删',
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                Refresh-List
+                return
+            }
+            if ($removed -eq 0) {
+                Log "没有任何启动项指向这块盘，删文件不会留下悬空菜单项"
+            }
 
             # 【v1.34 安全闸】删完必须确认这台机器还开得了机。
             #
@@ -499,16 +655,22 @@ function Show-Gui {
             $bmDefault = ''
             $selfCheckOk = $false
             try {
-                $afterRaw = (& bcdedit /enum osloader /v 2>&1 | Out-String)
+                # 【v1.36】和上面一样用精确代码页读：自检要解析「描述」，中文系统上描述就是中文，
+                # 读花了会让它跳过自己的修复动作。
+                $exAfter = Get-BcdOutputExact -BcdArgs @('/enum', 'osloader', '/v')
+                $afterRaw = if ($exAfter.Ok) { $exAfter.Text } else { (& bcdedit /enum osloader /v 2>&1 | Out-String) }
                 $spAfter = Split-BcdEntries $afterRaw
                 if ($spAfter.Ok) {
                     $selfCheckOk = $true
                     foreach ($ab in $spAfter.Blocks) {
                         if ($ab -notmatch '(?:identifier|标识符)\s+(\{[0-9a-fA-F\-]+\})') { continue }
                         $g = $Matches[1]
-                        if ($ab -match '(?im)^\s*device\s+ramdisk=') { continue }
+                        # 【v1.36】不比对标签：device / 设备 / Gerät 都算。
+                        # 老写法写死了英文 device，标签被本地化的系统上会跳过所有条目，
+                        # 于是这个自检以为一个可启动系统都不剩。
+                        if ($ab -match '(?im)ramdisk=') { continue }
                         if ($ab -match '(?im)(?:description|描述)\s+.*(?:Recovery|恢复|内存诊断|Memory Diagnostic|Windows Boot Manager)') { continue }
-                        if ($ab -notmatch '(?im)(?:device|osdevice)\s+(?:partition=|vhd=)') { continue }
+                        if (-not (Test-BcdBlockIsLoader -Text $ab)) { continue }
                         if ($aliveGuids -notcontains $g) { [void]$aliveGuids.Add($g) }
                     }
                 } else {
@@ -533,6 +695,18 @@ function Show-Gui {
                 } else {
                     Log "严重：删完之后 BCD 里一个可启动系统都不剩了"
                     if ($bcdBackup -and (Test-Path -LiteralPath $bcdBackup)) {
+                        # 【v1.36】/import 是整库覆盖：安装之后新增的启动项、后来的改动都会被一起回滚。
+                        # 先把当前库导出留档，这一步才算可撤销，日志里也能看到还原前的现场。
+                        $stampNow = (Get-Date).ToString('yyyyMMdd-HHmmss')
+                        $preDir = [System.IO.Path]::GetDirectoryName($bcdBackup)
+                        if (-not $preDir) { $preDir = $env:TEMP }
+                        $preImport = Join-Path $preDir ("bcd-before-restore-$stampNow.bcd")
+                        try {
+                            $exp = & bcdedit /export "$preImport" 2>&1 | Out-String
+                            Log ("还原前已另存当前 BCD：" + (($exp -replace '\s+', ' ').Trim()) + " -> $preImport")
+                        } catch {
+                            Log "还原前没能另存当前 BCD：$($_.Exception.Message)"
+                        }
                         Log "正在用安装时导出的 BCD 备份还原：$bcdBackup"
                         $imp = & bcdedit /import "$bcdBackup" 2>&1 | Out-String
                         Log ("还原结果：" + (($imp -replace '\s+', ' ').Trim()))
@@ -650,8 +824,13 @@ function Show-Gui {
             if ($released -eq 0) { Log "没有发现残留的 ESP 盘符" }
 
             Log "=== 卸载完成 ==="
+            $doneWhat = if ($removed -gt 0) {
+                "虚拟硬盘已删除，启动项已移除（$removed 条）。"
+            } else {
+                "虚拟硬盘已删除。BCD 里本来就没有指向它的启动项，没有需要移除的。"
+            }
             [System.Windows.Forms.MessageBox]::Show(
-                "卸载完成。`n`n虚拟硬盘已删除，启动项已移除。`n`n下次开机菜单里就不会再出现「$itName」了。`n" +
+                "卸载完成。`n`n$doneWhat`n`n下次开机菜单里就不会再出现「$itName」了。`n" +
                 "（如果菜单里还剩一项，可以忽略，或重启一次让它自动清理。）",
                 '完成',
                 [System.Windows.Forms.MessageBoxButtons]::OK,

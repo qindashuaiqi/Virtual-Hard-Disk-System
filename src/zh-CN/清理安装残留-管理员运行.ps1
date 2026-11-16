@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '1.35'
+$Script:Version = '1.36'
 $Script:OriginDir = $OriginDir
 
 try { $Host.UI.RawUI.WindowTitle = "清理安装残留 v$($Script:Version) - connectsegabot" } catch {}

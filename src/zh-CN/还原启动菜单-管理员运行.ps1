@@ -15,7 +15,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '1.35'
+$Script:Version = '1.36'
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()

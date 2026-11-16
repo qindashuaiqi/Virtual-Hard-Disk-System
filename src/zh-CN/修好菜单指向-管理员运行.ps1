@@ -15,7 +15,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '1.35'
+$Script:Version = '1.36'
 $Script:LogFile = Join-Path $env:TEMP ("修好菜单指向-{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
 
 function Write-Log {
@@ -45,21 +45,9 @@ function Invoke-Bcd {
     $bad = ($txt -match '找不到|not found|无效|invalid|拒绝|denied|失败|failed|错误|error')
     return @{ Ok = (($code -eq 0) -and (-not $bad)); Code = $code; Text = $clean; Raw = $txt }
 }
-
-# bcdedit 的输出走控制台代码页，打不出来的字会变成 "?"。英文启动器开头是 chcp 437，
-# 中文路径于是整个变成 "?"，写对了也被判成写错。
-function Test-BcdTextSame {
-    param([string]$Want, [string]$Got)
-    if ($null -eq $Got) { return $false }
-    if ($Got -eq $Want) { return $true }
-    if ($Got.Length -ne $Want.Length) { return $false }
-    for ($i = 0; $i -lt $Want.Length; $i++) {
-        if ($Got[$i] -eq $Want[$i]) { continue }
-        if ($Got[$i] -eq '?' -and [int][char]$Want[$i] -gt 127) { continue }
-        return $false
-    }
-    return $true
-}
+# 【v1.36】Test-BcdTextSame 搬进共享模块了：原来四个脚本各留一份同样的比较逻辑，
+# 改一处得改四处，而且几份会悄悄跑偏。
+. "$PSScriptRoot\..\shared\zh-CN\BcdVerify.ps1"
 
 # 完整路径 -> BCD 的 vhd= 写法。必须保留中间子目录：
 #   D:\虚拟磁盘\maimai.vhdx  ->  vhd=[D:]\虚拟磁盘\maimai.vhdx
