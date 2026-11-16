@@ -1,0 +1,30 @@
+name: check
+
+# [v1.36] The gate from check_all.py, run on every push and pull request.
+# The four data-loss bugs in this project were all found by a human reading code or by a
+# user hitting them; nothing was caught by a machine. This workflow is the beginning of a
+# different situation: syntax, payload identity, launcher execution and the unit tests run
+# automatically, on a clean Windows image.
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    # [v1.36] windows-latest defaults to cp1252 for Python's stdout. The gate prints Chinese
+    # file names and, when something is wrong, U+FFFD - both raised UnicodeEncodeError and made
+    # the job red for a reason unrelated to the code under test. The scripts also reconfigure
+    # themselves (_utf8_stdout.py); these two lines keep any other child process in line.
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run the release gate
+        run: |
+          chcp 65001 | Out-Null
+          python src/build/check_all.py
