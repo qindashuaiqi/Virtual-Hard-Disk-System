@@ -38,7 +38,14 @@ function Expand-TextLiteral([string]$expr) {
 }
 
 $problems = @()
-foreach ($file in (Get-ChildItem -LiteralPath $Dir -Filter '*.ps1' | Sort-Object Name)) {
+$scan = @(Get-ChildItem -LiteralPath $Dir -Filter '*.ps1' -File -ErrorAction SilentlyContinue | Sort-Object Name)
+if ($scan.Count -eq 0) {
+    # Nothing measured means nothing proven - report it as a failure, not as "OK".
+    Write-Output ("UI FIT: FAILED - no .ps1 found in '{0}'" -f $Dir)
+    throw 'UI FIT failed'
+}
+$controls = 0
+foreach ($file in $scan) {
     $lines = Get-Content -LiteralPath $file.FullName -Encoding UTF8
     $rec = @{}
     $ln = 0
@@ -80,6 +87,7 @@ foreach ($file in (Get-ChildItem -LiteralPath $Dir -Filter '*.ps1' | Sort-Object
         if (-not $r.W) { continue }                    # AutoSize / docked / panel child
         if ($r.AutoSize) { continue }
         $fs = if ($r.FontSize) { $r.FontSize } else { 9.0 }
+        $controls++
         $font = New-Object System.Drawing.Font('Microsoft YaHei UI', [single]$fs)
         $rows = $r.Text -split "`r`n|`n"
         $maxW = 0
@@ -99,9 +107,17 @@ foreach ($file in (Get-ChildItem -LiteralPath $Dir -Filter '*.ps1' | Sort-Object
     }
 }
 
+if ($controls -eq 0) {
+    Write-Output ("UI FIT: FAILED - scanned {0} file(s) but measured no fixed-size control in '{1}'" -f $scan.Count, $Dir)
+    throw 'UI FIT failed'
+}
+
 if ($problems.Count -eq 0) {
-    Write-Output 'UI FIT: OK - no fixed-size control clips its text.'
+    Write-Output ("UI FIT: OK - {0} fixed-size control(s) measured, none clips its text." -f $controls)
     return
 }
 Write-Output ("UI FIT: {0} problem(s)" -f $problems.Count)
 $problems | ForEach-Object { Write-Output ("  " + $_) }
+# The header promised exit code 1 on problems; without this the gate reported success
+# whenever something *was* wrong. throw instead of exit so a manual `& $sb` doesn't kill the host.
+throw 'UI FIT failed'

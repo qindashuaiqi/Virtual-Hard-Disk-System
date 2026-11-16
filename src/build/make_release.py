@@ -9,10 +9,16 @@ Usage:  python make_release.py <version> [out_dir]
 
 import hashlib
 import os
+import subprocess
 import sys
 import zipfile
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _utf8_stdout
+
+_utf8_stdout.setup()
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(HERE))
 
 
 def pack(src_subdir, out_dir, version):
@@ -48,8 +54,29 @@ def sha256(path):
 
 
 def main():
-    version = sys.argv[1] if len(sys.argv) > 1 else 'v1.32'
-    out_dir = sys.argv[2] if len(sys.argv) > 2 else os.path.join(REPO, '_release')
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    skip = '--skip-check' in sys.argv
+
+    # [v1.36] The version is required, and validated before the gate runs (no point spending a
+    # minute on checks to then fail on a typo). It used to default to 'v1.32', so running the
+    # script without an argument silently produced v1.32-named zips out of v1.36 code - a
+    # mislabelled release is worse than a missing one.
+    if not args:
+        raise SystemExit('usage: python make_release.py <version> [out_dir]   e.g. v1.36')
+    version = args[0]
+    if not version.startswith('v') or not version[1:2].isdigit():
+        raise SystemExit('the version should look like v1.36, got %r' % version)
+    out_dir = args[1] if len(args) > 1 else os.path.join(REPO, '_release')
+
+    # [v1.36] Everything that used to be "remember to run this first" is now a hard gate
+    # (see check_all.py). A release zip that fails the checks is worthless: it is the exact
+    # artefact a user double-clicks on a machine nobody can debug remotely.
+    if not skip:
+        rc = subprocess.call([sys.executable, os.path.join(HERE, 'check_all.py')])
+        if rc != 0:
+            raise SystemExit('\ncheck_all.py failed - nothing was packaged. '
+                             'Fix the failures above, or pass --skip-check to override.')
+
     os.makedirs(out_dir, exist_ok=True)
 
     sums = []

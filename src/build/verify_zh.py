@@ -13,6 +13,10 @@ import sys
 
 from inline_shared import inline_bytes
 
+import _utf8_stdout
+
+_utf8_stdout.setup()
+
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ZH = os.path.join(REPO, 'zh-CN')
 SRC = os.path.join(REPO, 'src', 'zh-CN')
@@ -29,11 +33,23 @@ PAIRS = {
     u'\u6025\u6551\u5de5\u5177\\\u5168\u91cf\u6ce8\u5165\u9a71\u52a8-\u7ba1\u7406\u5458\u8fd0\u884c.bat': u'\u5168\u91cf\u6ce8\u5165\u9a71\u52a8-\u7ba1\u7406\u5458\u8fd0\u884c.ps1',
     u'\u6025\u6551\u5de5\u5177\\\u65b0\u7cfb\u7edf-\u8bca\u65ad\u5e76\u88c5\u9a71\u52a8.bat': u'\u65b0\u7cfb\u7edf-\u8bca\u65ad\u5e76\u88c5\u9a71\u52a8.ps1',
     u'\u6025\u6551\u5de5\u5177\\\u65b0\u7cfb\u7edf-\u6e05\u7406\u5e7d\u7075\u663e\u5361.bat': u'\u65b0\u7cfb\u7edf-\u6e05\u7406\u5e7d\u7075\u663e\u5361.ps1',
+    # [v1.36] The menu launcher was the one bat verify_zh.py never looked at
+    # (11 pairs for 12 files). It carries no payload, so only its encoding and
+    # line endings are checked - same as Start.bat on the English side.
+    u'\u5f00\u59cb.bat': None,
 }
+
+
+def bat_path(root, bat):
+    # [v1.36] Keys use Windows separators ("tools\\x.bat"). os.path.join does not split
+    # on a backslash outside Windows, so every one of those nine entries reported
+    # "missing" when this ran on macOS/Linux - a false alarm that would make any
+    # non-Windows CI red for no reason.
+    return os.path.join(root, *[p for p in bat.split('\\') if p])
 
 fails = 0
 for bat, ps1 in PAIRS.items():
-    p = os.path.join(ZH, bat)
+    p = bat_path(ZH, bat)
     if not os.path.exists(p):
         print('FAIL %-46s missing' % bat)
         fails += 1
@@ -48,6 +64,9 @@ for bat, ps1 in PAIRS.items():
     if b'\n' in raw.replace(b'\r\n', b''):
         print('FAIL %-46s has bare LF line endings' % bat)
         fails += 1
+        continue
+    if ps1 is None:
+        print('OK   %-46s GBK + CRLF' % bat)
         continue
     if '-----BEGIN-----' not in text:
         print('FAIL %-46s no payload block' % bat)
@@ -75,7 +94,9 @@ for bat, ps1 in PAIRS.items():
         for fn in re.findall(r'^\s*function\s+([A-Za-z0-9_\-]+)', mod_txt, re.M):
             if not re.search(rb'function\s+' + fn.encode('ascii') + rb'\b', data):
                 bad.append(u'缺少函数 %s（来自 %s）' % (fn, rel))
-    if re.search(rb'\$PSScriptRoot[\\/]\.\.[\\/]shared', data, re.I):
+    # Only a real dot-source STATEMENT is a problem. The shared module's own header comment
+    # quotes the reference line as documentation, and that text is expected in the payload.
+    if re.search(rb'(?m)^[ \t]*\.[ \t]+["\']?\$PSScriptRoot[\\/]\.\.[\\/]shared', data, re.I):
         bad.append(u'运行期 dot-source 引用没有被内联掉')
     if bad:
         print('FAIL %-46s %s' % (bat, u'; '.join(bad)))

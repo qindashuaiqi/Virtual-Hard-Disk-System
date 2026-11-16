@@ -11,6 +11,10 @@ import sys
 
 from inline_shared import inline_bytes
 
+import _utf8_stdout
+
+_utf8_stdout.setup()
+
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 EN = os.path.join(REPO, 'en')  # release folder
 SRC = os.path.join(REPO, 'src', 'en')
@@ -71,7 +75,9 @@ for bat, ps1 in PAIRS.items():
         for fn in re.findall(r'^\s*function\s+([A-Za-z0-9_\-]+)', mod_txt, re.M):
             if not re.search(rb'function\s+' + fn.encode('ascii') + rb'\b', data):
                 bad.append('missing function %s from %s' % (fn, rel))
-    if re.search(rb'\$PSScriptRoot[\\/]\.\.[\\/]shared', data, re.I):
+    # Only a real dot-source STATEMENT is a problem. The shared module's own header comment
+    # quotes the reference line as documentation, and that text is expected in the payload.
+    if re.search(rb'(?m)^[ \t]*\.[ \t]+["\']?\$PSScriptRoot[\\/]\.\.[\\/]shared', data, re.I):
         bad.append('a run-time dot-source reference survived inlining')
     if bad:
         print('FAIL %-38s %s' % (bat, '; '.join(bad)))

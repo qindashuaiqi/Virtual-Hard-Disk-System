@@ -31,6 +31,10 @@ import subprocess
 import sys
 import tempfile
 
+import _utf8_stdout
+
+_utf8_stdout.setup()
+
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MARKER = 'BATTEST_REACHED_LAUNCH'
 
@@ -152,6 +156,10 @@ def main():
         targets += sorted(glob.glob(os.path.join(REPO, 'zh-CN', '急救工具', '*.bat')))
 
     scratch = tempfile.mkdtemp(prefix='battest_')
+    if not targets:
+        # A gate that runs nothing must not print "0 ok, 0 failed" and pass.
+        print('no .bat found for %s' % which)
+        return 1
     ok = fail = skip = 0
     all_problems = []
     for path in targets:
