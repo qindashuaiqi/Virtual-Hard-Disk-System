@@ -1,4 +1,4 @@
-# Virtual Hard Disk System
+﻿# Virtual Hard Disk System
 
 **Install Windows as a native-boot VHDX — no USB stick, no BIOS changes, no WinPE.**
 
@@ -33,6 +33,50 @@ The new system is a real disk to Windows: it takes drivers, software, Windows Up
 - **Recovery toolkit.** Nine focused tools for the failure modes found on real hardware: no menu after install, wrong vhdx path in the entry, leftover drive letters, drivers missing in the new system, an empty GPU in Task Manager, half-finished installs.
 
 ## Changelog
+
+### v1.36
+
+A review of v1.35 found thirteen issues; this release answers the ones that touch data safety and
+verification. Nothing here changes the intended behaviour - it removes the ways the tool could
+either destroy something it did not create, or report success when it had not succeeded.
+
+- **The uninstaller now knows what it built.** A `.vhdx` with no `.boot.txt` next to it (a backup
+  copy, a Hyper-V/WSL disk, a system from another tool) is still listed - hiding it would make it
+  impossible to clean up a half-finished install - but it is labelled `[not created by this toolkit]`,
+  deleting it requires typing the file name, and only an exact device-path match may remove a boot
+  entry. The old code listed every `.vhdx` it found as "an installed virtual system" and deleted it
+  after one Yes/No box.
+- **The same-drive fallback deletes only when there is exactly one candidate.** Two entries with the
+  same name on the same drive used to be deleted together, so `D:\A\Game.vhdx` and `D:\B\Game.vhdx`
+  took each other out.
+- **Device paths are compared character by character.** Masking every non-ASCII character turned
+  `D:\系统\游戏.vhdx` and `D:\备份\测试.vhdx` into the same string before a substring match.
+- **The read-back no longer depends on the console code page.** bcdedit output is now re-read with the
+  console and the decoder both forced to the system ANSI code page, so a Chinese path comes back
+  verbatim (measured; see the guide). The v1.32 fallback "does this path appear anywhere in the
+  exported store" is gone: an old entry pointing at the same file satisfied it, so a genuinely wrong
+  write could be reported as a successful install.
+- **The installer refuses to guess the firmware type.** `PEFirmwareType` first, then the boot manager's
+  own path (`\EFI\Microsoft\Boot\bootmgfw.efi` vs `\bootmgr`); the partition table is only a last
+  resort and is no longer acted on.
+- **Two failures now stop the install instead of warning.** A BCD backup that could not be written, and
+  an MBR partition that could not be marked active. Both used to continue: the first left the machine
+  without a rollback path, the second guaranteed a disk that cannot boot after twenty minutes of DISM.
+- **Before `bcdedit /import` the current store is exported first**, so the restore that fixes a broken
+  boot store is itself undoable.
+- **A release gate exists** (`src/build/check_all.py`, run automatically by `make_release.py`, plus a
+  GitHub Actions workflow): syntax, payload identity, launcher execution, unit tests, UI fit.
+- One `Test-BcdTextSame` copy instead of four (shared module), and `verify_zh.py` no longer reports
+  nine false failures outside Windows.
+
+A second pass over this very change found four more ways it could still destroy data or lie, all fixed
+before release: the uninstaller deleted the `.vhdx` even after deciding it could not prove which boot
+entry belonged to it (leaving a menu entry for a file that no longer exists); `bcdedit /delete` judged
+success by looking for Chinese words in output the launcher had already turned into mojibake, so a
+failed delete counted as one; the firmware/partition mismatch check in the repair tool only warned and
+then wrote a boot entry that cannot work; and the gate itself crashed under a GBK or cp1252 console.
+The delete decision is now a unit-tested function, deletes are judged by exit code, the mismatch is an
+error, and every build script pins UTF-8.
 
 ### v1.35
 
@@ -168,7 +212,8 @@ Removing them would break behaviour on Chinese Windows. Display strings, dialogs
 
 ```
 .iso ──Mount-DiskImage──► sources\install.wim / install.esd
-create .vhdx ──► attach ──► GPT + one NTFS partition ──► dism /Apply-Image
+create .vhdx ──► attach ──► one NTFS partition ──► dism /Apply-Image
+                         (GPT on UEFI, MBR + active on Legacy BIOS)
              ──► detach ──► bcdedit: device = vhd=[D:]\Folder\Name.vhdx
 ```
 
@@ -185,11 +230,11 @@ Four rules that were paid for the hard way (all documented in the guide):
 - It **adds** boot entries, it never edits or deletes anyone else's; uninstalling restores the original `timeout` / `displaybootmenu`.
 - The BCD is exported to `<folder>-logs\bcd-backup-<timestamp>.bcd` before every change.
 - Since v1.31 it never deletes `C:\Boot` (a genuine Windows boot folder). `C:\EFI` is only removed when three conditions hold: created within 48 hours, contains nothing but `Microsoft\Boot`, and holds no `BCD` / `bootmgfw.efi`.
-- Known limits: Legacy BIOS is refused, Secure Boot with a modified image fails with `0xc0000428`, and a vhdx on the same physical disk as the original system shares that disk's performance and failure modes.
+- Known limits: Secure Boot with a modified image fails with `0xc0000428`; a vhdx on the same physical disk as the original system shares that disk's performance and failure modes; Legacy BIOS is supported but has only been verified end to end in a virtual machine (see the guide).
 
 ## Tested on
 
-UEFI x64 machines running Windows 10 (19041) and Windows 11 hosts, installing Windows 10 / Windows Server 2022 images from `.wim` and `.iso`, into both drive roots and subfolders. Legacy BIOS, RAID/Intel RST controllers and Secure Boot with modified images are **not** verified — see [the guide](docs/USER-GUIDE.md#verified--not-verified).
+UEFI x64 machines running Windows 10 (19041) and Windows 11 hosts, installing Windows 10 / Windows Server 2022 images from `.wim` and `.iso`, into both drive roots and subfolders. Legacy BIOS has been verified end to end **in a virtual machine** only; BIOS-only physical machines, RAID/Intel RST controllers and Secure Boot with modified images are **not** verified — see [the guide](docs/USER-GUIDE.md#verified--not-verified).
 
 ## License
 

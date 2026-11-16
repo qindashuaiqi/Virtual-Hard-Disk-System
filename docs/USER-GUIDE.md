@@ -1,4 +1,4 @@
-# Virtual Hard Disk System — User Guide
+﻿# Virtual Hard Disk System — User Guide
 
 ## What this is
 
@@ -529,7 +529,7 @@ Only two things stay next to the virtual disk: **the vhdx itself** and its **`xx
 
 ### Not verified here
 
-- Legacy BIOS machines end to end: supported since v1.35 (MBR partition table + `winload.exe`), but so far only the script paths, the structural assertions and the regression tests have been exercised - not a full install on BIOS-only hardware
+- Legacy BIOS on **physical** hardware: supported since v1.35 (MBR partition table + `winload.exe`) and verified end to end in a virtual machine with Legacy BIOS firmware, but not on a BIOS-only physical machine. The open question there is whether the firmware can read the vhdx through INT13 on that particular controller, and RAID / Intel RST volumes are still untested
 - Secure Boot enabled with a modified image (`0xc0000428`)
 - RAID / Intel RST storage controllers
 
@@ -577,4 +577,5 @@ The Chinese guide (`docs/USER-GUIDE.zh-CN.md`) contains the full postmortems, in
 | v1.33 | `Say` extracted into a shared module and inlined at build time; no behaviour change |
 | v1.34 | **P0**: the uninstaller could delete the *host* boot entry (`-split "^-{20,}"` never matched a 19-dash dump) - it now splits on `identifier` |
 | v1.35 | **Legacy BIOS support**: MBR partition table + active flag + `winload.exe`; the installer no longer rejects non-UEFI machines |
+| v1.36 | Answers a 13-point code review: the uninstaller only deletes disks it created (or asks you to type the file name); same-drive matches must be unique; device paths are compared character by character; bcdedit is re-read with the console code page forced so non-ASCII paths verify; the firmware type comes from the boot manager instead of the partition table; a failed BCD backup or an unmarkable active partition aborts the install; `check_all.py` gates releases |
 | v2.0 | DISM no longer deadlocks at 12% (output goes to a file, the main thread polls); MSR partition handling for a single-partition layout |

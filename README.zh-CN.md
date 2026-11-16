@@ -1,4 +1,4 @@
-# 虚拟硬盘系统
+﻿# 虚拟硬盘系统
 
 **不用 U 盘、不改 BIOS、不进 PE，把 Windows 装成一个原生引导的 VHDX 系统。**
 
@@ -34,6 +34,38 @@
 
 ## 更新记录
 
+### v1.36
+
+v1.35 被逐条审读后提了 13 个问题，这一版处理的是「和数据安全、和验证是否有效」相关的部分。
+行为上没有新功能，做的是把「删掉不该删的东西」和「该失败却报成功」这两类口子堵掉。
+
+- **卸载器现在知道哪些盘是自己装的。** 旁边没有 `.boot.txt` 的 `.vhdx`（备份副本、Hyper-V/WSL 的盘、
+  别的工具装的系统）仍然会列出来 —— 藏掉的话「DISM 装到一半失败」留下的盘就永远删不掉 ——
+  但会标成「不是本工具装的」，删除必须手动输入文件名，而且只允许「完整路径精确命中」的启动项被删。
+  老版本把扫到的每个 `.vhdx` 都当成「装好的虚拟系统」，一个 Yes/No 就删。
+- **同盘符兜底只在唯一命中时才删。** 同盘同名两条以前会被一起删：`D:\A\Game.vhdx` 和
+  `D:\B\Game.vhdx` 互相带走。
+- **设备路径改成逐字符比对。** 以前把非 ASCII 全替换成 `?` 再做子串匹配，
+  `D:\系统\游戏.vhdx` 和 `D:\备份\测试.vhdx` 会变成同一个字符串。
+- **写回校验不再受控制台代码页影响。** 现在把控制台和解码器一起强制到系统 ANSI 代码页再读 bcdedit，
+  中文路径原样返回（有实测记录，见使用说明）。v1.32 那个「整库导出、在里面搜这段路径」的兜底删掉了：
+  旧条目只要指向同一个文件就能满足它，于是真写错了也可能报「安装成功」。
+- **固件类型不再靠猜。** 先看 `PEFirmwareType`，再问引导管理器自己的 path
+  （`\EFI\Microsoft\Boot\bootmgfw.efi` 还是 `\bootmgr`）；分区表只当最后一层，而且不再拿它当依据动手。
+- **两种失败改成中止安装。** BCD 备份写不出来、MBR 分区标不上 active。以前都是写一行 WARN 继续：
+  前者让机器失去回滚路径，后者保证二十分钟 DISM 之后交出一块起不来的盘。
+- **`bcdedit /import` 之前先把当前库导出留档**，于是「修坏引导」的这个动作本身也可撤销。
+- **有了发布门禁**（`src/build/check_all.py`，`make_release.py` 打包前强制执行，另配 GitHub Actions）：
+  语法、载荷一致性、启动器实跑、单元回归、界面尺寸。
+- `Test-BcdTextSame` 从四份收敛成一份（共享模块）；`verify_zh.py` 在非 Windows 上不再假报 9 个失败。
+
+这一版自己又被逐行读过一遍，又抓出四处「照样能毁数据 / 照样会撒谎」，都在打包前修掉了：
+证不了启动项归属时**仍然删了 `.vhdx`**（留下一条指向不存在文件的菜单项）；`bcdedit /delete`
+靠输出里的中文关键词判成败，而启动器早已把错误信息变成乱码，于是删失败也记成功；
+修复工具对 UEFI+MBR 只写一行 WARN，然后写一条起不来的启动项；门禁自己在 GBK / cp1252
+控制台下崩。现在删盘判定是一个有单测的函数、删除看退出码、固件与分区表不匹配直接报错、
+构建脚本统一钉死 UTF-8。
+
 ### v1.35
 
 - **支持 Legacy BIOS 机器。** 以前 Legacy 机器装到最后 1% 必然弹「配置启动菜单失败 / 只支持 UEFI」。原生启动 VHD 本来就有两条官方路径，v1.34 及以前只实现了 UEFI 那条：
@@ -46,7 +78,7 @@
 - 预检不再一刀切拒绝非 UEFI 机器，改为按固件算 `$vhdStyle`（BIOS=MBR / UEFI=GPT）；读不到固件类型时给出一条能照着做的排查步骤，而不是笼统报错。
 - 分区：`Initialize-Disk -PartitionStyle $vhdStyle`；MBR 分支显式 `-MbrType IFS` 并标 `active`（`Set-Partition -IsActive`，失败退 `diskpart active`，标完回读确认）。
 - 「修复启动菜单」同步支持两种固件，并新增一道配对检查：**Legacy BIOS + GPT 的 vhdx** 会直接说清「补启动项也没用，必须用新版重装」—— 这正是 v1.34 及以前在 BIOS 机器上留下的那种半成品盘，以前它只会建出一条一点就报 `0xc000000f` 的菜单。
-- **边界**：BIOS 这条路已通过语法 / 结构 / 回归断言，但尚未在纯 BIOS 真机上跑完整轮。工具改 BCD 前一定会导出 `bcd-backup-*.bcd`，真出问题可以用它还原。
+- **边界**：BIOS 这条路已在**虚拟机（Legacy BIOS 固件）**里端到端跑通，并覆盖语法 / 结构 / 回归断言；尚未在物理 BIOS-only 机型上验证。工具改 BCD 前一定会导出 `bcd-backup-*.bcd`，真出问题可以用它还原。
 - 全部工具版本统一到 v1.35。
 
 ### v1.34
@@ -135,7 +167,8 @@ python src/build/make_bat_zh.py
 
 ```
 .iso ──Mount-DiskImage──► sources\install.wim / install.esd
-创建 .vhdx ──► 挂载 ──► GPT + 一个 NTFS 分区 ──► dism /Apply-Image
+创建 .vhdx ──► 挂载 ──► 一个 NTFS 分区 ──► dism /Apply-Image
+                        （UEFI 用 GPT；Legacy BIOS 用 MBR + 标 active）
             ──► 卸载 ──► bcdedit: device = vhd=[D:]\目录\名字.vhdx
 ```
 
@@ -152,11 +185,11 @@ python src/build/make_bat_zh.py
 - 只**新增**启动项，不改不删别人的；卸载时把 `timeout` / `displaybootmenu` 还原
 - 每次改动前先把 BCD 导出到 `<目录>-logs\bcd-backup-<时间>.bcd`
 - v1.31 起**绝不删 `C:\Boot`**（那是 Windows 真正的引导目录）；`C:\EFI` 要同时满足三条才删：48 小时内创建、子目录只有 `Microsoft\Boot`、里面没有 `BCD` / `bootmgfw.efi`
-- 已知限制：Legacy BIOS 直接拒绝；改过的镜像开 Secure Boot 会 `0xc0000428`；vhdx 与原系统同盘时共享那块盘的性能与故障风险
+- 已知限制：改过的镜像开 Secure Boot 会 `0xc0000428`；vhdx 与原系统同盘时共享那块盘的性能与故障风险；Legacy BIOS 已支持，但目前只在虚拟机里跑通过整轮（见使用说明）
 
 ## 已验证
 
-UEFI x64 真机（Windows 10 19041 / Windows 11 宿主），从 `.wim` 和 `.iso` 安装 Windows 10 / Windows Server 2022，盘根和子目录都试过。Legacy BIOS、RAID/Intel RST、改过镜像 + Secure Boot **未验证** —— 见[使用说明](docs/USER-GUIDE.zh-CN.md)。
+UEFI x64 真机（Windows 10 19041 / Windows 11 宿主），从 `.wim` 和 `.iso` 安装 Windows 10 / Windows Server 2022，盘根和子目录都试过。Legacy BIOS **只在虚拟机里**跑通过整轮；物理 BIOS-only 机型、RAID/Intel RST、改过镜像 + Secure Boot **未验证** —— 见[使用说明](docs/USER-GUIDE.zh-CN.md)。
 
 ## 许可
 
